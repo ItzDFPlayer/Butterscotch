@@ -397,6 +397,62 @@ static void SWRenderer_endGUI(Renderer* renderer)
     UNIMP2();
 }
 
+// Returns true when a destination rectangle cannot contribute a single pixel to
+// the area currently being drawn into. The test mirrors the early-out inside
+// swrDrawSpriteInternal()/swrDrawSpriteRotatedInternal(), so culling here never
+// changes what ends up on screen - it only avoids decoding a texture page (up to
+// 8 MB and a full QOI pass) for content that is nowhere near the viewport.
+//
+// This matters on low-memory devices: a large room can reference far more
+// texture pages than fit in RAM, so paging in pages for off-screen instances
+// evicts pages that are still visible and the cache thrashes every frame.
+static bool swrDestIsOffscreen(SWRenderer* swr, float dx, float dy, float dw, float dh, bool mayRotate)
+{
+    if (swr == NULL || swr->fb == NULL) return false;
+    if (swr->portW <= 0 || swr->portH <= 0) return false;
+    if (swr->maxX <= swr->portX || swr->maxY <= swr->portY) return false;
+
+    swr->drawsAttempted++;
+
+    // Escape hatch in case a game relies on drawing being attempted off-screen.
+    static int cullingEnabled = -1;
+    if (cullingEnabled < 0) {
+        const char* noCull = getenv("BUTTERSCOTCH_NO_CULL");
+        cullingEnabled = (noCull != NULL && noCull[0] != '\0' && noCull[0] != '0') ? 0 : 1;
+    }
+    if (!cullingEnabled) return false;
+
+    swrTransformPosIfNeeded(swr, &dx, &dy);
+    swrTransformSizeIfNeeded(swr, &dw, &dh);
+
+    if (dw < 0.0f) { dx += dw; dw = -dw; }
+    if (dh < 0.0f) { dy += dh; dh = -dh; }
+    if (dw <= 0.0f || dh <= 0.0f) return true;
+
+    if (mayRotate) {
+        // A rotated sprite can reach outside its axis-aligned destination box, so
+        // test a square large enough to contain every rotation of it.
+        float cx = dx + dw * 0.5f;
+        float cy = dy + dh * 0.5f;
+        float radius = 0.5f * (dw + dh) + 2.0f;
+        dx = cx - radius;
+        dy = cy - radius;
+        dw = dh = radius * 2.0f;
+    }
+
+    // One pixel of slack for rounding differences with the draw routines.
+    int x0 = swrFloor(dx) - 1;
+    int y0 = swrFloor(dy) - 1;
+    int x1 = swrCeiling(dx + dw) + 1;
+    int y1 = swrCeiling(dy + dh) + 1;
+
+    bool offscreen = false;
+    if (x1 <= swr->portX || y1 <= swr->portY) offscreen = true;
+    if (x0 >= swr->maxX || y0 >= swr->maxY) offscreen = true;
+    if (offscreen) swr->drawsCulled++;
+
+    return offscreen;
+}
 static void SWRenderer_drawSprite(Renderer* renderer, int32_t tpagIndex, float x, float y,
                                   float originX, float originY, float xscale, float yscale,
                                   float angleDeg, uint32_t color, float alpha)
@@ -415,7 +471,23 @@ static void SWRenderer_drawSprite(Renderer* renderer, int32_t tpagIndex, float x
         fprintf(stderr, "%s: tpagIndex of %d is invalid, as pageId of %d is invalid\n", __func__, tpagIndex, pageId);
         return;
     }
-    if (!swrEnsureTextureIsLoaded(swr, (uint32_t) pageId)) {
+
+    // Reject draws that cannot reach the screen BEFORE touching the texture page.
+    // Large rooms reference far more pages than fit in RAM on a handheld, and a
+    // decoded 2048x2048 page costs ~8 MB and a full QOI decode; loading pages for
+    // instances that are off-screen is what makes the cache thrash.
+    {
+        float cullDx = (float) (tpag->targetX - originX) * xscale + x;
+        float cullDy = (float) (tpag->targetY - originY) * yscale + y;
+        float cullDw = xscale * (float) tpag->targetWidth;
+        float cullDh = yscale * (float) tpag->targetHeight;
+        if (swrDestIsOffscreen(swr, cullDx, cullDy, cullDw, cullDh, swrMustRotate(angleDeg))) {
+            return;
+        }
+    }
+
+    if (!swrEnsureTextureRegion(swr, (uint32_t) pageId, tpag->sourceX, tpag->sourceY,
+                                tpag->sourceWidth, tpag->sourceHeight)) {
         fprintf(stderr, "%s: could not ensure texture is loaded, tpagIndex: %d, pageId: %d\n", __func__, tpagIndex, pageId);
         return;
     }
@@ -467,7 +539,19 @@ static void SWRenderer_drawSpritePart(Renderer* renderer, int32_t tpagIndex,
     TexturePageItem* tpag = &dwin->tpag.items[tpagIndex];
     int16_t pageId = tpag->texturePageId;
     if (0 > pageId || swr->totalTextureCount <= (uint32_t) pageId) return;
-    if (!swrEnsureTextureIsLoaded(swr, (uint32_t) pageId)) return;
+
+    // Tiles and sprite parts (including font glyphs) come through here, so culling
+    // off-screen draws keeps far-away room tiles from decoding texture pages.
+    if (swrDestIsOffscreen(swr, x, y, xscale * (float) srcW, yscale * (float) srcH,
+                           swrMustRotate(angleDeg))) {
+        return;
+    }
+
+    // Only the strips covering this source rectangle are decoded.
+    if (!swrEnsureTextureRegion(swr, (uint32_t) pageId, tpag->sourceX + srcOffX, tpag->sourceY + srcOffY,
+                                srcW, srcH)) {
+        return;
+    }
     
     int sx = tpag->sourceX + (int) srcOffX;
     int sy = tpag->sourceY + (int) srcOffY;
@@ -610,6 +694,25 @@ static void SWRenderer_drawSpriteTiled(Renderer* renderer, int32_t tpagIndex,
     TexturePageItem* tpag = &dwin->tpag.items[tpagIndex];
     int16_t pageId = tpag->texturePageId;
     if (0 > pageId || swr->totalTextureCount <= (uint32_t) pageId) return;
+
+    // Cull the whole tiled area before decoding the page for it.
+    {
+        float cullAx = fabsf(xscale);
+        float cullAy = fabsf(yscale);
+        float cullTileW = (float) tpag->boundingWidth * cullAx;
+        float cullTileH = (float) tpag->boundingHeight * cullAy;
+        float cullStartX = x - originX * cullAx;
+        float cullStartY = y - originY * cullAy;
+        float cullEndX = tileX ? roomW : cullStartX + cullTileW;
+        float cullEndY = tileY ? roomH : cullStartY + cullTileH;
+        // The wrap-around start can be one tile further left/up than the origin.
+        if (tileX) cullStartX -= cullTileW;
+        if (tileY) cullStartY -= cullTileH;
+        if (swrDestIsOffscreen(swr, cullStartX, cullStartY, cullEndX - cullStartX, cullEndY - cullStartY, false)) {
+            return;
+        }
+    }
+
     if (!swrEnsureTextureIsLoaded(swr, (uint32_t) pageId)) return;
 
     float axScale = fabsf(xscale);
