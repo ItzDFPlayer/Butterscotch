@@ -151,7 +151,7 @@ static bool sidecarWrite(SidecarUpdate* sidecar, uint32_t pageId, const uint8_t*
 // the page instead of all of it, which is what keeps big-room texture memory
 // down. Falls back to a flat (whole-page) blob when checkpoints cannot be built.
 static bool writeBakedPage(SidecarUpdate* sidecar, uint32_t pageId, const uint8_t* qoi, size_t qoiSize) {
-    int width = 0, height = 0, stripCount = 0;
+    int width = 0, height = 0;
     int stripRows = QOI_STRIP_ROWS;
 
     if (qoiSize < 12) return false;

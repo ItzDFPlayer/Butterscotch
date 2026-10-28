@@ -615,6 +615,13 @@ static char* resolveSharedSaveDir(const char* dataWinDir) {
     return parentDir;
 }
 
+// Paint the texture-preparation progress bar straight into the framebuffer while the
+// <data.win>.bsq sidecar is being built. Off by default: the bake pass runs before the
+// first frame is presented, per-texture progress is already written to the log, and on
+// a small screen the bar mostly flickers. Set this to true, or export
+// BUTTERSCOTCH_BAKE_PROGRESS_BAR=1, to show it.
+static bool showBakeProgressBar = false;
+
 typedef struct {
     Renderer* renderer;
     int32_t width;
@@ -627,7 +634,7 @@ static void onTextureBakeProgress(void* userData, uint32_t done, uint32_t total)
     float progress = total > 0 ? (float) done / (float) total : 1.0f;
 
 #ifdef ENABLE_SW_RENDERER
-    if (ctx->graphical && ctx->renderer != nullptr) {
+    if (showBakeProgressBar && ctx->graphical && ctx->renderer != nullptr) {
         SWRenderer_showLoadingProgress(ctx->renderer, ctx->width, ctx->height, progress);
     }
 #endif
@@ -859,6 +866,14 @@ int loop(CommandLineArgs args, const char *argv0) {
         const char* noPrefetch = getenv("BUTTERSCOTCH_NO_PREFETCH");
         if (noPrefetch != nullptr && noPrefetch[0] != '\0' && noPrefetch[0] != '0') {
             prefetchTextures = false;
+        }
+    }
+
+    // Optional progress bar for the bake pass; see showBakeProgressBar.
+    {
+        const char* bakeBar = getenv("BUTTERSCOTCH_BAKE_PROGRESS_BAR");
+        if (bakeBar != nullptr && bakeBar[0] != '\0' && bakeBar[0] != '0') {
+            showBakeProgressBar = true;
         }
     }
 
