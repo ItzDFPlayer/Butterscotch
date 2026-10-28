@@ -395,6 +395,60 @@ FORCE_INLINE bool swrCanBlendVector(const SWRenderer* swr, int srcalpha, int dst
            dstalpha == 256 - srcalpha;
 }
 
+// Blends a scaled (nearest-neighbour) sprite rectangle eight pixels at a time.
+// The gather is still scalar - source columns are stepped by a fixed-point delta -
+// but it is a handful of adds and loads per eight pixels, while the blend maths that
+// follows is the expensive part and runs on vectors.
+static void swrBlendSpriteScaledVector(SWRenderer* swr, int dx, int dy, int dw, int dh,
+                                       const SWTexture* texture, int sx, int sy, int sh_val,
+                                       int iys, int oys, int iys2, int oys2,
+                                       int ixs2, int oxs2, int fp_prec,
+                                       uintpixel_t tintColor, int srcalpha, int dstalpha)
+{
+    const bool applyTint = !swrTintIsWhite(tintColor);
+    const swrVec8 tintR = swrSplat8((uint16_t) ((tintColor >> 10) & 0x1F));
+    const swrVec8 tintG = swrSplat8((uint16_t) ((tintColor >> 5) & 0x1F));
+    const swrVec8 tintB = swrSplat8((uint16_t) (tintColor & 0x1F));
+
+    int32_t ys2 = iys2;
+    for (int y = 0, ys = iys; y < dh; y++, ys += oys, ys2 += oys2)
+    {
+        const uintpixel_t* srcline;
+        uintpixel_t* dstline = &swr->fb[(dy + y) * swr->fbPitch + dx];
+        if (dh == sh_val)
+            srcline = &texture->buffer[(sy + ys) * texture->width + sx];
+        else
+            srcline = &texture->buffer[(sy + (int)(ys2 >> fp_prec)) * texture->width + sx];
+
+        int32_t xs2 = ixs2;
+        int x = 0;
+
+        for (; x + 8 <= dw; x += 8)
+        {
+            uint16_t gathered[8];
+            for (int k = 0; k < 8; k++)
+            {
+                gathered[k] = srcline[(int)(xs2 >> fp_prec)];
+                xs2 += oxs2;
+            }
+
+            swrVec8 s, d;
+            memcpy(&s, gathered, sizeof(s));
+            memcpy(&d, dstline + x, sizeof(d));
+
+            swrVec8 out = swrBlendVec(s, d, tintR, tintG, tintB, applyTint, srcalpha, dstalpha);
+            memcpy(dstline + x, &out, sizeof(out));
+        }
+
+        for (; x < dw; x++, xs2 += oxs2)
+        {
+            uintpixel_t pixel = srcline[(int)(xs2 >> fp_prec)];
+            if (opaque(pixel))
+                alphaBlend(&dstline[x], tint(tintColor, pixel), srcalpha, dstalpha);
+        }
+    }
+}
+
 // Blends a whole unscaled, unflipped sprite rectangle: one call per draw, so small
 // tiles (8x8 UI pieces, for instance) do not pay a call per row.
 static void swrBlendSpriteVector(SWRenderer* swr, int dx, int dy, int dw, int dh,
@@ -504,16 +558,37 @@ static void swrDrawSpriteInternal(
     int srcalpha = swrCalcSrcAlpha(swr, alpha);
     int invalpha = swrCalcDstAlpha(swr, alpha);
 
-    if (sw == dw && sh == dh && !flipX && !flipY)
+    const bool unscaled = (sw == dw && sh == dh && !flipX && !flipY);
+    const bool plainCopy = swrTintIsWhite(tintColor) && srcalpha > 253 && invalpha < 3;
+
+#if PIXEL_SIZE == 16 && defined(__GNUC__)
+    // Rasterise the whole sprite with the vector kernel when the blend maths allows
+    // it. Copies are left to the scalar path below: they are already dominated by the
+    // memory traffic, and the SIMD gather would cost more than it saves.
+    if (!plainCopy && swrCanBlendVector(swr, srcalpha, invalpha))
+    {
+        swr->pxWritten += (uint64_t) dw * (uint64_t) dh;
+        swr->pxVectorBlend += (uint64_t) dw * (uint64_t) dh;
+
+        if (unscaled)
+            swrBlendSpriteVector(swr, dx, dy, dw, dh, texture, sx, sy, tintColor, srcalpha, invalpha);
+        else
+            swrBlendSpriteScaledVector(swr, dx, dy, dw, dh, texture, sx, sy, sh,
+                                       iys, oys, iys2, oys2, ixs2, oxs2, fp_prec,
+                                       tintColor, srcalpha, invalpha);
+        return;
+    }
+#endif
+
+    if (unscaled)
     {
         // Unscaled, unflipped blit: what tiles, background layers and most UI end
         // up going through. With no tint and full opacity the source pixel simply
         // replaces the destination, so runs can be copied whole (see
-        // swrCopyRunOpaque). Otherwise the row goes through the vector kernel when
-        // it is applicable, and the scalar per-pixel path when it is not.
+        // swrCopyRunOpaque); the remaining cases blend per pixel.
         swr->pxWritten += (uint64_t) dw * (uint64_t) dh;
 
-        if (swrTintIsWhite(tintColor) && srcalpha > 253 && invalpha < 3)
+        if (plainCopy)
         {
             swr->pxFastCopy += (uint64_t) dw * (uint64_t) dh;
 
@@ -525,13 +600,6 @@ static void swrDrawSpriteInternal(
                 swrCopyRunOpaque(dstline, srcline, dw);
             }
         }
-#if PIXEL_SIZE == 16 && defined(__GNUC__)
-        else if (swrCanBlendVector(swr, srcalpha, invalpha))
-        {
-            swr->pxVectorBlend += (uint64_t) dw * (uint64_t) dh;
-            swrBlendSpriteVector(swr, dx, dy, dw, dh, texture, sx, sy, tintColor, srcalpha, invalpha);
-        }
-#endif
         else
         {
             for (int y = 0; y < dh; y++)
@@ -562,7 +630,7 @@ static void swrDrawSpriteInternal(
                 srcline = &texture->buffer[(sy + ys) * texture->width + sx];
             else
                 srcline = &texture->buffer[(sy + (int)(ys2 >> fp_prec)) * texture->width + sx];
-            
+
             fixedp_t xs2 = ixs2;
             for (int x = 0; x < dw; x++, xs2 += oxs2)
             {
