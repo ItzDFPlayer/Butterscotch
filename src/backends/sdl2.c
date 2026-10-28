@@ -12,6 +12,10 @@
 #include <switch.h>
 #include "switch_input.h"
 #endif
+#ifdef ENABLE_SW_RENDERER
+#include "sw/pixel_convert.h"
+#endif
+#endif
 
 static Runner *g_runner;
 static SDL_Surface* scr;
@@ -308,12 +312,27 @@ void platformInitFunctions(Runner *runner) {
 
 static SDL_Surface* nextFb = NULL;
 
-void platformSetNextFramebuffer(uint32_t* framebuffer, int width, int height) {
+void platformSetNextFramebuffer(uintpixel_t* framebuffer, int width, int height) {
     if (nextFb) {
         SDL_FreeSurface(nextFb);
         nextFb = NULL;
     }
 
+    // Match the software renderer's configured pixel size; using 32bpp for a
+    // 16bpp framebuffer makes SDL read past the buffer.
+#if PIXEL_SIZE == 16
+    nextFb = SDL_CreateRGBSurfaceFrom(
+        framebuffer,
+        width,
+        height,
+        16,
+        width * 2,
+        0x7C00, // Rmask
+        0x03E0, // Gmask
+        0x001F, // Bmask
+        0x0000  // Amask
+    );
+#elif PIXEL_SIZE == 32
     nextFb = SDL_CreateRGBSurfaceFrom(
         framebuffer,
         width,
@@ -325,6 +344,16 @@ void platformSetNextFramebuffer(uint32_t* framebuffer, int width, int height) {
         0x000000ff, // Bmask
         0x00000000  // Amask
     );
+#else
+    nextFb = SDL_CreateRGBSurfaceFrom(
+        framebuffer,
+        width,
+        height,
+        8,
+        width,
+        0, 0, 0, 0
+    );
+#endif
 }
 
 #endif
