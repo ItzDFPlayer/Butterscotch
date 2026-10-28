@@ -100,6 +100,11 @@ static void swrFillSpanVector(uintpixel_t* dst, int count, uintpixel_t color,
     const swrVec8 mask5 = swrSplat8(0x1F);
     const swrVec8 opaqueBit = swrSplat8(0x8000);
 
+    // bm_subtract arrives with a negated weight (swrCalcSrcAlpha does that); the
+    // magnitude is what the per-channel maths needs, while the tail must keep the
+    // sign so alphaBlend() reaches the same conclusion.
+    const int mag = (mode == SWR_FILL_SUBTRACT) ? -srcalpha : srcalpha;
+
     // alphaBlend() short-circuits these two cases before any arithmetic; if the
     // vector path did not do the same the results would visibly disagree (a fully
     // transparent write would flip the destination alpha bit on, and an opaque one
@@ -121,16 +126,16 @@ static void swrFillSpanVector(uintpixel_t* dst, int count, uintpixel_t color,
     // subtract term rounds up because the scalar path computes the difference before
     // shifting, which floors the negated sum.
     const int round = (mode == SWR_FILL_SUBTRACT) ? 255 : 0;
-    const int addR = (sr * srcalpha + round) >> 8;
-    const int addG = (sg * srcalpha + round) >> 8;
-    const int addB = (sb * srcalpha + round) >> 8;
+    const int addR = (sr * mag + round) >> 8;
+    const int addG = (sg * mag + round) >> 8;
+    const int addB = (sb * mag + round) >> 8;
     const swrVec8 kR = swrSplat8((uint16_t) addR);
     const swrVec8 kG = swrSplat8((uint16_t) addG);
     const swrVec8 kB = swrSplat8((uint16_t) addB);
     const swrVec8 sR = swrSplat8((uint16_t) sr);
     const swrVec8 sG = swrSplat8((uint16_t) sg);
     const swrVec8 sB = swrSplat8((uint16_t) sb);
-    const swrVec8 srcAlpha = swrSplat8((uint16_t) srcalpha);
+    const swrVec8 srcAlpha = swrSplat8((uint16_t) mag);
     const swrVec8 dstAlpha = swrSplat8((uint16_t) dstalpha);
 
     // A subtract removes the destination alpha bit as well; see alphaBlend().
@@ -174,6 +179,7 @@ static void swrFillSpanVector(uintpixel_t* dst, int count, uintpixel_t color,
     for (; i < count; i++)
         alphaBlend(&dst[i], color, srcalpha, dstalpha);
 }
+
 // The vector filler reproduces alphaBlend() for the modes it accepts.
 FORCE_INLINE bool swrCanFillSpanVector(int srcalpha)
 {
@@ -216,10 +222,7 @@ static void swrDrawHLineInt(Renderer* renderer, int dx, int dy, int dw, uintpixe
 #if PIXEL_SIZE == 16 && defined(__GNUC__)
         if (swrCanFillSpanVector(srcalpha))
         {
-            // bm_subtract arrives with a negated weight; the filler wants the magnitude.
-            int mode = swrFillSpanMode(swr);
-            int magnitude = (mode == SWR_FILL_SUBTRACT) ? -srcalpha : srcalpha;
-            swrFillSpanVector(line, dw, color, magnitude, invalpha, mode);
+            swrFillSpanVector(line, dw, color, srcalpha, invalpha, swrFillSpanMode(swr));
             return;
         }
 #endif
@@ -1078,9 +1081,7 @@ static void swrDrawTriangleInternal(SWRenderer* swr, int xup, int yup, int xleft
         // spotlight discs are rasterised.
         if (swrCanFillSpanVector(srcalpha))
         {
-            int mode = swrFillSpanMode(swr);
-            int magnitude = (mode == SWR_FILL_SUBTRACT) ? -srcalpha : srcalpha;
-            swrFillSpanVector(line + x1, x2 - x1, color1, magnitude, invalpha, mode);
+            swrFillSpanVector(line + x1, x2 - x1, color1, srcalpha, invalpha, swrFillSpanMode(swr));
             continue;
         }
 #endif
