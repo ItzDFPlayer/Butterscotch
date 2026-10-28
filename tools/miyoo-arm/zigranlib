@@ -1,0 +1,15 @@
+#!/bin/sh
+# ranlib for the Miyoo build; see zigcc for how zig is located.
+set -e
+here=$(cd "$(dirname "$0")" && pwd)
+
+zig=${ZIG:-}
+if [ -z "$zig" ]; then
+    if [ -x "$here/.zig/zig" ]; then
+        zig="$here/.zig/zig"
+    else
+        zig=zig
+    fi
+fi
+
+exec "$zig" ranlib "$@"
