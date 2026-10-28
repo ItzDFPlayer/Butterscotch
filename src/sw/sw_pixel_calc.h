@@ -59,6 +59,19 @@ FORCE_INLINE uintpixel_t tint(uintpixel_t tintColor, uintpixel_t color)
 #endif
 }
 
+// True when `tintColor` is the identity tint, i.e. tint() returns the pixel
+// unchanged. The blit fast paths use this to skip the per-pixel tint test.
+FORCE_INLINE bool swrTintIsWhite(uintpixel_t tintColor)
+{
+#if PIXEL_SIZE == 32
+    return (tintColor & 0xFFFFFF) == 0xFFFFFF;
+#elif PIXEL_SIZE == 16
+    return (tintColor & 0x7FFF) == 0x7FFF;
+#else
+    return tintColor == 0xFF || tintColor == PXL_TRANSPARENT;
+#endif
+}
+
 // Performs alpha blending on a pixel, with another pixel.
 //
 // NOTE: alpha is between 0 and 256, NOT between 0 and 255!

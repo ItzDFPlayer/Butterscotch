@@ -1,6 +1,7 @@
 #include <stdlib.h>
 #include <limits.h>
 #include <float.h>
+#include <string.h>
 #include "text_utils.h"
 #include "sw_renderer_private.h"
 
@@ -273,12 +274,62 @@ static void swrDrawLineInt(Renderer* renderer, int x1, int y1, int x2, int y2, M
     }
 }
 
+// Copies one run of destination pixels from a 1:1 source, skipping transparent
+// source pixels. Four pixels are tested at a time so a completely opaque run turns
+// into a single 8-byte load/store pair instead of four per-pixel branches.
+//
+// Tile maps and background layers are mostly opaque runs, and they are the bulk of
+// what a software renderer spends its time on, so this is worth the special case.
+//
+// The store goes through a may_alias word pointer rather than memcpy: GCC 15 cannot
+// bound `dst + x` here and emits a spurious -Wstringop-overflow for the memcpy.
+typedef uint32_t swrAliasWord __attribute__((may_alias));
+
+static void swrCopyRunOpaque(uintpixel_t* dst, const uintpixel_t* src, int count)
+{
+#if PIXEL_SIZE == 16
+    int x = 0;
+
+    for (; x + 4 <= count; x += 4)
+    {
+        uint64_t quad;
+        memcpy(&quad, src + x, sizeof(quad));
+
+        if ((quad & 0x8000800080008000ull) == 0x8000800080008000ull)
+        {
+            swrAliasWord* words = (swrAliasWord*) (void*) (dst + x);
+            words[0] = (uint32_t) quad;
+            words[1] = (uint32_t) (quad >> 32);
+        }
+        else
+        {
+            for (int i = 0; i < 4; i++)
+            {
+                uintpixel_t pixel = src[x + i];
+                if (opaque(pixel)) dst[x + i] = pixel;
+            }
+        }
+    }
+
+    for (; x < count; x++)
+    {
+        uintpixel_t pixel = src[x];
+        if (opaque(pixel)) dst[x] = pixel;
+    }
+#else
+    for (int x = 0; x < count; x++)
+    {
+        uintpixel_t pixel = src[x];
+        if (opaque(pixel)) dst[x] = pixel;
+    }
+#endif
+}
+
 static void swrDrawSpriteInternal(
     Renderer* renderer, int dx, int dy, int dw, int dh,
     SWTexture* texture, int sx, int sy, int sw, int sh,
     uintpixel_t tintColor, int alpha
-)
-{
+){
     SWRenderer *swr = (SWRenderer*) renderer;
     
     bool flipX = false, flipY = false;
@@ -346,25 +397,36 @@ static void swrDrawSpriteInternal(
     
     int srcalpha = swrCalcSrcAlpha(swr, alpha);
     int invalpha = swrCalcDstAlpha(swr, alpha);
-    
-    if (sw == dw)
+
+    if (sw == dw && sh == dh && !flipX && !flipY)
     {
-        fixedp_t ys2 = (fixedp_t) iys2;
-        for (int y = 0, ys = iys; y < dh; y++, ys += oys, ys2 += oys2)
+        // Unscaled, unflipped blit: what tiles, background layers and most UI end
+        // up going through. With no tint and full opacity the source pixel simply
+        // replaces the destination, so runs can be copied whole (see
+        // swrCopyRunOpaque) instead of going through alphaBlend per pixel.
+        if (swrTintIsWhite(tintColor) && srcalpha > 253 && invalpha < 3)
         {
-            uintpixel_t* dstline;
-            const uintpixel_t* srcline;
-            dstline = &swr->fb[(dy + y) * swr->fbPitch + dx];
-            if (dh == sh)
-                srcline = &texture->buffer[(sy + ys) * texture->width + sx];
-            else
-                srcline = &texture->buffer[(sy + (int)(ys2 >> fp_prec)) * texture->width + sx];
-            
-            for (int x = 0, xs = ixs; x < dw; x++, xs += oxs)
+            for (int y = 0; y < dh; y++)
             {
-                uintpixel_t pixel = srcline[xs];
-                if (opaque(pixel))
-                    alphaBlend(&dstline[x], tint(tintColor, pixel), srcalpha, invalpha);
+                const uintpixel_t* srcline = &texture->buffer[(sy + y) * texture->width + sx];
+                uintpixel_t* dstline = &swr->fb[(dy + y) * swr->fbPitch + dx];
+
+                swrCopyRunOpaque(dstline, srcline, dw);
+            }
+        }
+        else
+        {
+            for (int y = 0; y < dh; y++)
+            {
+                const uintpixel_t* srcline = &texture->buffer[(sy + y) * texture->width + sx];
+                uintpixel_t* dstline = &swr->fb[(dy + y) * swr->fbPitch + dx];
+
+                for (int x = 0; x < dw; x++)
+                {
+                    uintpixel_t pixel = srcline[x];
+                    if (opaque(pixel))
+                        alphaBlend(&dstline[x], tint(tintColor, pixel), srcalpha, invalpha);
+                }
             }
         }
     }
@@ -382,7 +444,7 @@ static void swrDrawSpriteInternal(
                 srcline = &texture->buffer[(sy + (int)(ys2 >> fp_prec)) * texture->width + sx];
             
             fixedp_t xs2 = ixs2;
-            for (int x = 0, xs = ixs; x < dw; x++, xs += oxs, xs2 += oxs2)
+            for (int x = 0; x < dw; x++, xs2 += oxs2)
             {
                 uintpixel_t pixel = srcline[(int)(xs2 >> fp_prec)];
                 if (opaque(pixel))
