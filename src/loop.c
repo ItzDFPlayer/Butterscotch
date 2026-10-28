@@ -615,12 +615,14 @@ static char* resolveSharedSaveDir(const char* dataWinDir) {
     return parentDir;
 }
 
-// Paint the texture-preparation progress bar straight into the framebuffer while the
-// <data.win>.bsq sidecar is being built. Off by default: the bake pass runs before the
-// first frame is presented, per-texture progress is already written to the log, and on
-// a small screen the bar mostly flickers. Set this to true, or export
-// BUTTERSCOTCH_BAKE_PROGRESS_BAR=1, to show it.
-static bool showBakeProgressBar = false;
+// Paint the texture-preparation progress bars straight into the framebuffer: the one
+// shown while the <data.win>.bsq sidecar is built, and the one shown while a room's
+// texture pages are decoded after a room change. Off by default: per-page progress is
+// already written to the log, the bars mostly flicker on a small screen, and games that
+// cannot be pre-baked (Undertale's pages are not QOI/bz2) redecode pages at every room
+// change, so the bar ends up flashing constantly during play. Set this to true, or
+// export BUTTERSCOTCH_LOADING_BAR=1, to show them.
+static bool showLoadingBar = false;
 
 typedef struct {
     Renderer* renderer;
@@ -634,7 +636,7 @@ static void onTextureBakeProgress(void* userData, uint32_t done, uint32_t total)
     float progress = total > 0 ? (float) done / (float) total : 1.0f;
 
 #ifdef ENABLE_SW_RENDERER
-    if (showBakeProgressBar && ctx->graphical && ctx->renderer != nullptr) {
+    if (showLoadingBar && ctx->graphical && ctx->renderer != nullptr) {
         SWRenderer_showLoadingProgress(ctx->renderer, ctx->width, ctx->height, progress);
     }
 #endif
@@ -790,11 +792,15 @@ static void prefetchRoomTextures(Runner* runner, Renderer* renderer, int32_t bar
     int decoded = 0;
     int32_t total = (int32_t) pageCount;
 
-    SWRenderer_showLoadingProgress(renderer, barW, barH, 0.0f);
+    if (showLoadingBar) {
+        SWRenderer_showLoadingProgress(renderer, barW, barH, 0.0f);
+    }
     for (int32_t i = 0; i < total; i++) {
         if (SWRenderer_prefetchTexturePage(renderer, pages[i]))
             decoded++;
-        SWRenderer_showLoadingProgress(renderer, barW, barH, (float) (i + 1) / (float) total);
+        if (showLoadingBar) {
+            SWRenderer_showLoadingProgress(renderer, barW, barH, (float) (i + 1) / (float) total);
+        }
     }
 
     double elapsedMs = (double) (nowNanos() - startedAt) / 1000000.0;
@@ -869,11 +875,13 @@ int loop(CommandLineArgs args, const char *argv0) {
         }
     }
 
-    // Optional progress bar for the bake pass; see showBakeProgressBar.
+    // Optional progress bars for texture preparation; see showLoadingBar.
     {
-        const char* bakeBar = getenv("BUTTERSCOTCH_BAKE_PROGRESS_BAR");
-        if (bakeBar != nullptr && bakeBar[0] != '\0' && bakeBar[0] != '0') {
-            showBakeProgressBar = true;
+        const char* loadingBar = getenv("BUTTERSCOTCH_LOADING_BAR");
+        const char* bakeBar = getenv("BUTTERSCOTCH_BAKE_PROGRESS_BAR"); // older name
+        if ((loadingBar != nullptr && loadingBar[0] != '\0' && loadingBar[0] != '0') ||
+            (bakeBar != nullptr && bakeBar[0] != '\0' && bakeBar[0] != '0')) {
+            showLoadingBar = true;
         }
     }
 
