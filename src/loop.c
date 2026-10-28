@@ -1156,8 +1156,17 @@ int loop(CommandLineArgs args, const char *argv0) {
         // Initialize the file system
         char* dataWinDir = safeStrdup(args.dataWinPath);
         bsGetDirname(dataWinDir);
-        const char* savePath = args.saveFolder != nullptr ? args.saveFolder : dataWinDir;
+        const char* savePath = args.saveFolder;
+        char* sharedSaveDir = nullptr;
+        if (savePath == nullptr) {
+            sharedSaveDir = resolveSharedSaveDir(dataWinDir);
+            savePath = sharedSaveDir != nullptr ? sharedSaveDir : dataWinDir;
+            if (sharedSaveDir != nullptr) {
+                logInfo("Using shared save folder: %s\n", sharedSaveDir);
+            }
+        }
         OverlayFileSystem* overlayFs = OverlayFileSystem_create(dataWinDir, savePath);
+        free(sharedSaveDir);
         free(dataWinDir);
 
         gfx = args.renderer;
