@@ -32,6 +32,8 @@ typedef struct {
     uint32_t rssBytes;       // process memory, 0 when unavailable
     uint64_t drawsAttempted; // sprite/tile draws issued this frame
     uint64_t drawsCulled;    // of those, how many were skipped as off-screen
+    uint64_t pxWritten;      // destination pixels covered by sprite blits (cumulative)
+    uint64_t pxFastCopy;     // of those, how many took the opaque copy path (cumulative)
 } PerfLogFrame;
 
 // Opens `path` for writing. `slowFrameMs` is the threshold (in wall-frame

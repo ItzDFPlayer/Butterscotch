@@ -404,8 +404,12 @@ static void swrDrawSpriteInternal(
         // up going through. With no tint and full opacity the source pixel simply
         // replaces the destination, so runs can be copied whole (see
         // swrCopyRunOpaque) instead of going through alphaBlend per pixel.
+        swr->pxWritten += (uint64_t) dw * (uint64_t) dh;
+
         if (swrTintIsWhite(tintColor) && srcalpha > 253 && invalpha < 3)
         {
+            swr->pxFastCopy += (uint64_t) dw * (uint64_t) dh;
+
             for (int y = 0; y < dh; y++)
             {
                 const uintpixel_t* srcline = &texture->buffer[(sy + y) * texture->width + sx];
@@ -432,6 +436,8 @@ static void swrDrawSpriteInternal(
     }
     else
     {
+        swr->pxWritten += (uint64_t) dw * (uint64_t) dh;
+
         fixedp_t ys2 = iys2;
         for (int y = 0, ys = iys; y < dh; y++, ys += oys, ys2 += oys2)
         {

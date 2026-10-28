@@ -98,6 +98,11 @@ typedef struct
     // they were entirely outside the current viewport.
     uint64_t drawsAttempted;
     uint64_t drawsCulled;
+    // Rasterisation counters for --perf-log. pxWritten counts destination pixels
+    // covered by sprite blits (transparent source pixels are skipped, so it is an
+    // upper bound), and pxFastCopy counts the part that took the opaque copy path.
+    uint64_t pxWritten;
+    uint64_t pxFastCopy;
     // Recently evicted pages, used to detect thrashing.
     uint32_t recentEvictedPages[8];
     uint64_t recentEvictedTicks[8];

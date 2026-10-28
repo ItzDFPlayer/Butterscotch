@@ -20,6 +20,8 @@ typedef struct {
     uint32_t evictions;
     uint64_t drawsAttempted;
     uint64_t drawsCulled;
+    uint64_t pxWritten;
+    uint64_t pxFastCopy;
 } SWRendererTextureStats;
 
 void SWRenderer_getTextureStats(Renderer* renderer, SWRendererTextureStats* out);

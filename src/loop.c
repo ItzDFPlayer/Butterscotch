@@ -1909,6 +1909,8 @@ int loop(CommandLineArgs args, const char *argv0) {
                         perfFrame.textureEvictions = texStats.evictions;
                         perfFrame.drawsAttempted = texStats.drawsAttempted;
                         perfFrame.drawsCulled = texStats.drawsCulled;
+                        perfFrame.pxWritten = texStats.pxWritten;
+                        perfFrame.pxFastCopy = texStats.pxFastCopy;
                     }
 #endif
                     if (!perfRoomKnown || perfRoom != perfLastRoom) {

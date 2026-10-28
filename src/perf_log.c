@@ -39,6 +39,8 @@ struct PerfLog {
     uint32_t beatLastEvict;
     uint64_t beatLastAttempted;
     uint64_t beatLastCulled;
+    uint64_t beatLastPixels;
+    uint64_t beatLastFastPixels;
     uint32_t lastTextureLoads;
     uint32_t lastTextureEvict;
     uint32_t lastBudgetBytes;
@@ -290,12 +292,28 @@ bool PerfLog_frame(PerfLog* log, const PerfLogFrame* frame) {
         log->beatLastEvict = frame->textureEvictions;
         // Draw culling is also a window delta; it shows how much off-screen content
         // the view is skipping (and therefore which pages never need decoding).
+        uint64_t attemptedInWindow = perfDelta(frame->drawsAttempted, log->beatLastAttempted);
         PerfLog_note(log, "draws in window %d-%d: %llu issued, %llu culled as off-screen",
                      perfWindowStart(log, frame), frame->frame,
-                     perfDelta(frame->drawsAttempted, log->beatLastAttempted),
+                     attemptedInWindow,
                      perfDelta(frame->drawsCulled, log->beatLastCulled));
         log->beatLastAttempted = frame->drawsAttempted;
         log->beatLastCulled = frame->drawsCulled;
+        // Pixels actually pushed through the rasteriser. This is what separates a
+        // frame that is slow because it draws a lot from one that is slow because
+        // each draw is expensive.
+        {
+            uint64_t px = perfDelta(frame->pxWritten, log->beatLastPixels);
+            uint64_t fast = perfDelta(frame->pxFastCopy, log->beatLastFastPixels);
+            double frames = (double) log->beatFrames;
+            PerfLog_note(log, "pixels in window %d-%d: %.0fK/frame, %.0f%% opaque fast path (%.0f per draw)",
+                         perfWindowStart(log, frame), frame->frame,
+                         (double) px / frames / 1024.0,
+                         px > 0 ? 100.0 * (double) fast / (double) px : 0.0,
+                         attemptedInWindow > 0 ? (double) px / (double) attemptedInWindow : 0.0);
+            log->beatLastPixels = frame->pxWritten;
+            log->beatLastFastPixels = frame->pxFastCopy;
+        }
         log->beatFrames = 0;
         log->beatSumStep = 0.0;
         log->beatSumDraw = 0.0;

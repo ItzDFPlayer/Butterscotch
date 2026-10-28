@@ -234,6 +234,8 @@ void SWRenderer_getTextureStats(Renderer* renderer, SWRendererTextureStats* out)
     out->evictions = swr->textureEvictions;
     out->drawsAttempted = swr->drawsAttempted;
     out->drawsCulled = swr->drawsCulled;
+    out->pxWritten = swr->pxWritten;
+    out->pxFastCopy = swr->pxFastCopy;
 }
 
 bool SWRenderer_prefetchTexturePage(Renderer* renderer, int32_t pageId)
