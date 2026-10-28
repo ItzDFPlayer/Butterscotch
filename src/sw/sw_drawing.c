@@ -64,6 +64,136 @@ static void swrDrawSpanEx(SWRenderer* swr, int x, int y, int count, uintpixel_t 
         swrBlitPixelEx(swr, &dstline[i], srcPixel, srcAlpha, maskBits);
 }
 
+// ==== Vectorised fills ====
+//
+// Solid-colour spans are the cheapest thing in the renderer to vectorise and they
+// dominate some scenes: Deltarune Chapter 3's iris/spotlight object repaints a
+// full-screen veil plus three discs into a 2040x480 surface every single frame,
+// which is two full-screen fills per frame on top of the scene. As 8-lane vectors
+// each span costs about a quarter of the scalar alphaBlend() loop on a Cortex-A7.
+#if PIXEL_SIZE == 16 && defined(__GNUC__)
+typedef uint16_t swrVec8 __attribute__((vector_size(16)));
+typedef int16_t swrVec8s __attribute__((vector_size(16)));
+
+FORCE_INLINE swrVec8 swrSplat8(uint16_t value)
+{
+    swrVec8 out = { value, value, value, value, value, value, value, value };
+    return out;
+}
+
+FORCE_INLINE swrVec8 swrMinVec(swrVec8 a, swrVec8 b)
+{
+    swrVec8 lower = (a < b);
+    return (a & lower) | (b & ~lower);
+}
+
+FORCE_INLINE swrVec8 swrMaxVec(swrVec8 a, swrVec8 b)
+{
+    swrVec8 higher = (a > b);
+    return (a & higher) | (b & ~higher);
+}
+
+// 0 = normal, 1 = additive (clamped per channel), 2 = subtract.
+#define SWR_FILL_NORMAL   0
+#define SWR_FILL_ADD      1
+#define SWR_FILL_SUBTRACT 2
+
+// Fills `count` pixels from `dst` with one colour. `srcalpha`/`dstalpha` follow the
+// same convention as alphaBlend().
+static void swrFillSpanVector(uintpixel_t* dst, int count, uintpixel_t color,
+                              int srcalpha, int dstalpha, int mode)
+{
+    const swrVec8 mask5 = swrSplat8(0x1F);
+    const swrVec8 opaqueBit = swrSplat8(0x8000);
+
+    // alphaBlend() short-circuits these two cases before any arithmetic; if the
+    // vector path did not do the same the results would visibly disagree (a fully
+    // transparent write would flip the destination alpha bit on, and an opaque one
+    // would gain an alpha bit it must not have).
+    if (srcalpha == 0) return;
+    if (dstalpha < 3 && srcalpha > 253)
+    {
+        swrVec8 src = swrSplat8(color);
+        for (int i = 0; i < count; i++)
+            memcpy(dst + i, &src, sizeof(src));
+        return;
+    }
+
+    const int sr = (color >> 10) & 0x1F;
+    const int sg = (color >> 5) & 0x1F;
+    const int sb = color & 0x1F;
+
+    // For add/subtract the source term is a constant, so it is folded once. The
+    // subtract term rounds up because the scalar path computes the difference before
+    // shifting, which floors the negated sum.
+    const int round = (mode == SWR_FILL_SUBTRACT) ? 255 : 0;
+    const int addR = (sr * srcalpha + round) >> 8;
+    const int addG = (sg * srcalpha + round) >> 8;
+    const int addB = (sb * srcalpha + round) >> 8;
+    const swrVec8 kR = swrSplat8((uint16_t) addR);
+    const swrVec8 kG = swrSplat8((uint16_t) addG);
+    const swrVec8 kB = swrSplat8((uint16_t) addB);
+    const swrVec8 sR = swrSplat8((uint16_t) sr);
+    const swrVec8 sG = swrSplat8((uint16_t) sg);
+    const swrVec8 sB = swrSplat8((uint16_t) sb);
+    const swrVec8 srcAlpha = swrSplat8((uint16_t) srcalpha);
+    const swrVec8 dstAlpha = swrSplat8((uint16_t) dstalpha);
+
+    // A subtract removes the destination alpha bit as well; see alphaBlend().
+    const swrVec8 alphaBits = (mode == SWR_FILL_SUBTRACT) ? swrSplat8(0) : opaqueBit;
+
+    int i = 0;
+    for (; i + 8 <= count; i += 8)
+    {
+        swrVec8 d;
+        memcpy(&d, dst + i, sizeof(d));
+
+        swrVec8 dr = (d >> 10) & mask5;
+        swrVec8 dg = (d >> 5) & mask5;
+        swrVec8 db = d & mask5;
+
+        swrVec8 r, g, b;
+        if (mode == SWR_FILL_ADD)
+        {
+            r = swrMinVec(dr + kR, mask5);
+            g = swrMinVec(dg + kG, mask5);
+            b = swrMinVec(db + kB, mask5);
+        }
+        else if (mode == SWR_FILL_SUBTRACT)
+        {
+            // dst - min(dst, delta) saturates at zero without a signed compare.
+            r = dr - swrMinVec(dr, kR);
+            g = dg - swrMinVec(dg, kG);
+            b = db - swrMinVec(db, kB);
+        }
+        else
+        {
+            r = (dr * dstAlpha + sR * srcAlpha) >> 8;
+            g = (dg * dstAlpha + sG * srcAlpha) >> 8;
+            b = (db * dstAlpha + sB * srcAlpha) >> 8;
+        }
+
+        swrVec8 out = alphaBits | (r << 10) | (g << 5) | b;
+        memcpy(dst + i, &out, sizeof(out));
+    }
+
+    for (; i < count; i++)
+        alphaBlend(&dst[i], color, srcalpha, dstalpha);
+}
+// The vector filler reproduces alphaBlend() for the modes it accepts.
+FORCE_INLINE bool swrCanFillSpanVector(int srcalpha)
+{
+    return srcalpha >= -256 && srcalpha <= 256;
+}
+
+FORCE_INLINE int swrFillSpanMode(const SWRenderer* swr)
+{
+    if (swr->blendMode == bm_add) return SWR_FILL_ADD;
+    if (swr->blendMode == bm_subtract) return SWR_FILL_SUBTRACT;
+    return SWR_FILL_NORMAL;
+}
+#endif
+
 static void swrDrawHLineInt(Renderer* renderer, int dx, int dy, int dw, uintpixel_t color, UNUSED uintpixel_t color2, int alpha)
 {
     SWRenderer *swr = (SWRenderer*) renderer;
@@ -88,6 +218,18 @@ static void swrDrawHLineInt(Renderer* renderer, int dx, int dy, int dw, uintpixe
 #endif
     {
         uintpixel_t *line = &swr->fb[dy * swr->fbPitch + dx];
+
+#if PIXEL_SIZE == 16 && defined(__GNUC__)
+        if (swrCanFillSpanVector(srcalpha))
+        {
+            // bm_subtract arrives with a negated weight; the filler wants the magnitude.
+            int mode = swrFillSpanMode(swr);
+            int magnitude = (mode == SWR_FILL_SUBTRACT) ? -srcalpha : srcalpha;
+            swrFillSpanVector(line, dw, color, magnitude, invalpha, mode);
+            return;
+        }
+#endif
+
         for (int i = 0; i < dw; i++)
             alphaBlend(&line[i], color, srcalpha, invalpha);
     }
@@ -390,21 +532,6 @@ FORCE_INLINE void swrCopyRunOpaque(uintpixel_t* dst, const uintpixel_t* src, int
 // weights sum to 256, so each channel stays inside its 5-bit range and the scalar
 // clamps never fire.
 #if PIXEL_SIZE == 16 && defined(__GNUC__)
-typedef uint16_t swrVec8 __attribute__((vector_size(16)));
-typedef int16_t swrVec8s __attribute__((vector_size(16)));
-
-FORCE_INLINE swrVec8 swrSplat8(uint16_t value)
-{
-    swrVec8 out = { value, value, value, value, value, value, value, value };
-    return out;
-}
-
-FORCE_INLINE swrVec8 swrMinVec(swrVec8 a, swrVec8 b)
-{
-    swrVec8 lower = (a < b);
-    return (a & lower) | (b & ~lower);
-}
-
 FORCE_INLINE swrVec8 swrBlendVec(swrVec8 src, swrVec8 dst, swrVec8 tintR, swrVec8 tintG, swrVec8 tintB,
                                  bool applyTint, bool additive, int srcalpha, int dstalpha)
 {
@@ -951,6 +1078,19 @@ static void swrDrawTriangleInternal(SWRenderer* swr, int xup, int yup, int xleft
         if (x1 > x2) continue;
         
         uintpixel_t* line = &swr->fb[y * swr->width];
+
+#if PIXEL_SIZE == 16 && defined(__GNUC__)
+        // Circles and ellipses become triangle fans, so this is where Chapter 3's
+        // spotlight discs are rasterised.
+        if (swrCanFillSpanVector(srcalpha))
+        {
+            int mode = swrFillSpanMode(swr);
+            int magnitude = (mode == SWR_FILL_SUBTRACT) ? -srcalpha : srcalpha;
+            swrFillSpanVector(line + x1, x2 - x1, color1, magnitude, invalpha, mode);
+            continue;
+        }
+#endif
+
         for (int x = x1; x < x2; x++) {
             alphaBlend(&line[x], color1, srcalpha, invalpha);
         }
