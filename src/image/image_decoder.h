@@ -11,4 +11,46 @@
 // Caller is responsible for free()ing the returned buffer.
 uint8_t* ImageDecoder_decodeToRgba(const uint8_t* blob, size_t blobSize, bool gm2022_5, int* outW, int* outH);
 
+// Same as ImageDecoder_decodeToRgba, but writes 16-bit RGB1555 pixels (2 bytes each,
+// matching the software renderer's pixel format) to avoid a full RGBA intermediate.
+// Returns a malloc'd buffer of size (*outW) * (*outH) * 2 bytes, or nullptr on failure.
+uint16_t* ImageDecoder_decodeToRgb565(const uint8_t* blob, size_t blobSize, bool gm2022_5, int* outW, int* outH);
+
+// Reads the image dimensions from the blob header without decoding any pixels.
+// Supports GameMaker QOI ("fioq"), BZip2+QOI ("2zoq"), and PNG.
+// Returns true on success.
+bool ImageDecoder_probeDimensions(const uint8_t* blob, size_t blobSize, bool gm2022_5, int* outW, int* outH);
+
+// Returns a malloc'd uncompressed "fioq" QOI blob for a TXTR blob (decompressing
+// BZip2 when needed). Used by the offline texture baker. PNG blobs return nullptr.
+// Caller must free() the result.
+uint8_t* ImageDecoder_extractQoi(const uint8_t* blob, size_t blobSize, bool gm2022_5, size_t* outSize);
+// ===[ Sub-page (strip) decoding ]===
+//
+// QOI is a sequential format, so a sub-rectangle of a page cannot be decoded
+// without knowing the decoder state at that point. The baker therefore stores
+// one checkpoint per strip of QOI_STRIP_ROWS rows; the runtime can then resume
+// decoding at any strip and only materialise the rows it actually draws.
+
+#define QOI_STRIP_ROWS 128
+
+// Serialised decoder state at a strip boundary. 268 bytes, copied verbatim into
+// the baked-texture sidecar.
+typedef struct {
+    uint32_t pos;          // byte offset into the QOI pixel data
+    uint32_t runRemaining; // pixels still to emit with rgba (0 = read the next opcode)
+    uint8_t rgba[4];
+    uint8_t index[256];
+} QoiCheckpoint;
+
+// Streams a plain "fioq" blob once and writes one checkpoint per strip start.
+// Returns false when the blob is not plain QOI or the buffer is too small.
+bool ImageDecoder_buildCheckpoints(const uint8_t* blob, size_t blobSize,
+                                   int stripRows, QoiCheckpoint* checkpoints, int checkpointCapacity,
+                                   int* outW, int* outH, int* outStripCount);
+
+// Decodes `pixelCount` RGB565 pixels starting at `start` into dst. `start` must
+// come from ImageDecoder_buildCheckpoints for this blob.
+bool ImageDecoder_decodeStrip(const uint8_t* blob, size_t blobSize, const QoiCheckpoint* start,
+                              uint16_t* dst, size_t pixelCount);
 #endif /* _BS_IMAGE_DECODER_H_ */

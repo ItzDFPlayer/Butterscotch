@@ -73,6 +73,64 @@ static void unmapFile(uint8_t *ptr, size_t size) {
 #endif
 }
 
+// Maps an optional <data.win>.bsq sidecar produced by --bake-textures.
+static void loadBakedTextures(DataWin* dw, const char* dataWinPath, size_t dataWinSize) {
+    static const char kMagic[BAKED_TEXTURES_MAGIC_LEN] = { 'B', 'S', 'Q', 'O', 'I', '1', 0, 0 };
+
+    size_t pathLen = strlen(dataWinPath) + 5;
+    char* sidecarPath = (char *) safeMalloc(pathLen);
+    snprintf(sidecarPath, pathLen, "%s.bsq", dataWinPath);
+
+    FILE* f = fopen(sidecarPath, "rb");
+    if (!f) {
+        free(sidecarPath);
+        return;
+    }
+
+    fseek(f, 0, SEEK_END);
+    long sidecarSize = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (sidecarSize < (long) sizeof(BakedTexturesHeader)) {
+        fclose(f);
+        free(sidecarPath);
+        return;
+    }
+
+    uint8_t* mapped = mapFile(f, (size_t) sidecarSize);
+    fclose(f);
+    if (!mapped) {
+        free(sidecarPath);
+        return;
+    }
+
+    BakedTexturesHeader* header = (BakedTexturesHeader*) mapped;
+    bool headerOk =
+        memcmp(header->magic, kMagic, BAKED_TEXTURES_MAGIC_LEN) == 0 &&
+        header->version == BAKED_TEXTURES_VERSION &&
+        header->format == BAKED_TEXTURES_FORMAT_QOI &&
+        header->entrySize == sizeof(BakedTextureEntry) &&
+        header->sourceSize == (uint64_t) dataWinSize &&
+        header->pageCount <= 65536;
+    bool valid =
+        headerOk &&
+        sizeof(BakedTexturesHeader) + (size_t) header->pageCount * sizeof(BakedTextureEntry) <= (size_t) sidecarSize;
+
+    if (!valid) {
+        logWarn("Ignoring stale or invalid baked-texture sidecar: %s\n", sidecarPath);
+        unmapFile(mapped, (size_t) sidecarSize);
+        free(sidecarPath);
+        return;
+    }
+
+    dw->bakedTextures = mapped;
+    dw->bakedTexturesSize = (size_t) sidecarSize;
+    dw->bakedTexturesHeader = header;
+    dw->bakedTextureEntries = (BakedTextureEntry*) (mapped + sizeof(BakedTexturesHeader));
+
+    logInfo("Baked textures: %u pages from %s (%ld KB)\n", header->pageCount, sidecarPath, sidecarSize / 1024);
+    free(sidecarPath);
+}
+
 // ===[ HELPERS ]===
 
 // Reads a uint32 absolute file offset, resolves it into the pre-loaded STRG buffer,
@@ -2810,12 +2868,279 @@ static void parseAUDO(BinaryReader* reader, DataWin* dw, bool loadAudioDataLazil
     free(ptrs);
 }
 
+static bool openAutoBakeFile(DataWin* dw) {
+    static const char kMagic[BAKED_TEXTURES_MAGIC_LEN] = { 'B', 'S', 'Q', 'O', 'I', '1', 0, 0 };
+
+    if (dw->sourcePath == nullptr || dw->fileSize == 0 || dw->txtr.count == 0) {
+        return false;
+    }
+    if (dw->autoBakeEntries == nullptr) {
+        dw->autoBakeEntries = (BakedTextureEntry*) safeCalloc(dw->txtr.count, sizeof(BakedTextureEntry));
+    }
+
+    size_t pathLen = strlen(dw->sourcePath) + 5;
+    char* path = (char*) safeMalloc(pathLen);
+    snprintf(path, pathLen, "%s.bsq", dw->sourcePath);
+
+    FILE* f = fopen(path, "r+b");
+    bool initialized = false;
+
+    if (f != nullptr) {
+        BakedTexturesHeader header;
+        if (fread(&header, sizeof(header), 1, f) == 1 &&
+            memcmp(header.magic, kMagic, BAKED_TEXTURES_MAGIC_LEN) == 0 &&
+            header.version == BAKED_TEXTURES_VERSION &&
+            header.format == BAKED_TEXTURES_FORMAT_QOI &&
+            header.entrySize == sizeof(BakedTextureEntry) &&
+            header.sourceSize == (uint64_t) dw->fileSize &&
+            header.pageCount == dw->txtr.count &&
+            fread(dw->autoBakeEntries, sizeof(BakedTextureEntry), header.pageCount, f) == header.pageCount) {
+            long end = (fseek(f, 0, SEEK_END) == 0) ? ftell(f) : -1;
+            if (end >= 0) {
+                dw->autoBakeAppendOffset = (size_t) end;
+                initialized = true;
+                logInfo("Auto-bake: using existing %s\n", path);
+            }
+        }
+        if (!initialized) {
+            fclose(f);
+            f = fopen(path, "w+b");
+        }
+    } else {
+        f = fopen(path, "w+b");
+    }
+
+    if (f == nullptr) {
+        logWarn("Auto-bake: cannot write %s; texture caching disabled for this run.\n", path);
+        free(path);
+        return false;
+    }
+
+    if (!initialized) {
+        BakedTexturesHeader header;
+        memset(&header, 0, sizeof(header));
+        memcpy(header.magic, kMagic, BAKED_TEXTURES_MAGIC_LEN);
+        header.version = BAKED_TEXTURES_VERSION;
+        header.format = BAKED_TEXTURES_FORMAT_QOI;
+        header.pageCount = dw->txtr.count;
+        header.entrySize = (uint32_t) sizeof(BakedTextureEntry);
+        header.sourceSize = (uint64_t) dw->fileSize;
+
+        memset(dw->autoBakeEntries, 0, (size_t) dw->txtr.count * sizeof(BakedTextureEntry));
+
+        if (fwrite(&header, sizeof(header), 1, f) != 1 ||
+            fwrite(dw->autoBakeEntries, sizeof(BakedTextureEntry), dw->txtr.count, f) != dw->txtr.count) {
+            logWarn("Auto-bake: initial write to %s failed; texture caching disabled.\n", path);
+            fclose(f);
+            free(path);
+            return false;
+        }
+        fflush(f);
+        dw->autoBakeAppendOffset = sizeof(header) + (size_t) dw->txtr.count * sizeof(BakedTextureEntry);
+        logInfo("Auto-bake: creating %s (pages are added as they load)\n", path);
+    }
+
+    dw->autoBakeFile = f;
+    free(path);
+    return true;
+}
+
+void DataWin_autoBakeTexture(DataWin* dw, uint32_t pageId, const uint8_t* qoi, size_t qoiSize) {
+    if (!dw->autoBakeTextures || dw->autoBakeFailed || qoi == nullptr || qoiSize < 12) {
+        return;
+    }
+    if (pageId >= dw->txtr.count || qoiSize > UINT32_MAX) {
+        return;
+    }
+
+    if (dw->autoBakeFile == nullptr && !openAutoBakeFile(dw)) {
+        dw->autoBakeFailed = true;
+        return;
+    }
+    if (dw->autoBakeEntries[pageId].present) {
+        return; // already stored in the sidecar
+    }
+
+    FILE* f = dw->autoBakeFile;
+    size_t offset = dw->autoBakeAppendOffset;
+    while ((offset & 3) != 0) {
+        offset++;
+    }
+
+    BakedTextureEntry entry;
+    entry.offset = (uint64_t) offset;
+    entry.size = (uint32_t) qoiSize;
+    entry.present = 1;
+
+    long indexPosition = (long) (sizeof(BakedTexturesHeader) + (size_t) pageId * sizeof(BakedTextureEntry));
+
+    bool ok =
+        fseek(f, (long) offset, SEEK_SET) == 0 &&
+        fwrite(qoi, 1, qoiSize, f) == qoiSize &&
+        fseek(f, indexPosition, SEEK_SET) == 0 &&
+        fwrite(&entry, sizeof(entry), 1, f) == 1 &&
+        fseek(f, 0, SEEK_END) == 0;
+
+    if (!ok) {
+        dw->autoBakeFailed = true;
+        fclose(f);
+        dw->autoBakeFile = nullptr;
+        logWarn("Auto-bake: write failed; texture caching disabled for this run.\n");
+        return;
+    }
+
+    fflush(f);
+    dw->autoBakeEntries[pageId] = entry;
+    dw->autoBakeAppendOffset = offset + qoiSize;
+    dw->autoBakeCount++;
+}
+
+void DataWin_refreshBakedTextures(DataWin* dw) {
+    if (dw == nullptr) return;
+
+    if (dw->bakedTextures != nullptr) {
+        unmapFile(dw->bakedTextures, dw->bakedTexturesSize);
+    }
+    dw->bakedTextures = nullptr;
+    dw->bakedTexturesSize = 0;
+    dw->bakedTexturesHeader = nullptr;
+    dw->bakedTextureEntries = nullptr;
+
+    if (dw->sourcePath != nullptr) {
+        loadBakedTextures(dw, dw->sourcePath, dw->fileSize);
+    }
+}
+
+// Describes a baked texture page: the plain QOI data plus, for sidecars written
+// by current bakers, one decoder checkpoint per horizontal strip (allowing the
+// renderer to decode a single strip instead of the whole page).
+bool DataWin_getBakedPage(DataWin* dw, uint32_t pageId, BakedPageView* out) {
+    if (out != nullptr) {
+        memset(out, 0, sizeof(*out));
+    }
+    if (dw->bakedTexturesHeader == nullptr || pageId >= dw->bakedTexturesHeader->pageCount) {
+        return false;
+    }
+
+    BakedTextureEntry* entry = &dw->bakedTextureEntries[pageId];
+    if (!entry->present || entry->size < 12) {
+        return false;
+    }
+    if (entry->offset > dw->bakedTexturesSize ||
+        entry->size > dw->bakedTexturesSize - entry->offset) {
+        return false;
+    }
+
+    const uint8_t* blob = dw->bakedTextures + entry->offset;
+
+    if (blob[0] == 'f' && blob[1] == 'i' && blob[2] == 'o' && blob[3] == 'q') {
+        // Legacy flat page: whole-page decoding only.
+        if (out != nullptr) {
+            out->qoi = blob;
+            out->qoiSize = entry->size;
+        }
+        return true;
+    }
+
+    if (entry->size < sizeof(BakedPageHeader)) {
+        return false;
+    }
+
+    const BakedPageHeader* page = (const BakedPageHeader*) blob;
+    if (memcmp(page->magic, BAKED_PAGE_MAGIC, 4) != 0 || page->version != BAKED_PAGE_VERSION) {
+        return false;
+    }
+    if (page->stripCount == 0 || page->stripCount > 64 || page->stripRows == 0) {
+        return false;
+    }
+
+    size_t checkpointBytes = (size_t) page->stripCount * sizeof(QoiCheckpoint);
+    if (sizeof(BakedPageHeader) + checkpointBytes > entry->size) {
+        return false;
+    }
+    if (page->qoiOffset < sizeof(BakedPageHeader) + checkpointBytes) {
+        return false;
+    }
+    if (page->qoiSize == 0 || (uint64_t) page->qoiOffset + page->qoiSize > entry->size) {
+        return false;
+    }
+
+    const uint8_t* qoi = blob + page->qoiOffset;
+    if (!(qoi[0] == 'f' && qoi[1] == 'i' && qoi[2] == 'o' && qoi[3] == 'q')) {
+        return false;
+    }
+
+    if (out != nullptr) {
+        out->qoi = qoi;
+        out->qoiSize = page->qoiSize;
+        out->checkpoints = (const QoiCheckpoint*) (blob + sizeof(BakedPageHeader));
+        out->stripCount = (int) page->stripCount;
+        out->stripRows = (int) page->stripRows;
+        out->width = (int) page->width;
+        out->height = (int) page->height;
+    }
+    return true;
+}
+
+// Legacy accessor: the whole-page QOI blob, also valid for wrapped page blobs
+// (callers that only need the QOI data and do a full decode).
+const uint8_t* DataWin_getBakedTexture(DataWin* dw, uint32_t pageId, size_t* outSize) {
+    BakedPageView view;
+    if (!DataWin_getBakedPage(dw, pageId, &view)) {
+        return nullptr;
+    }
+    if (outSize) *outSize = view.qoiSize;
+    return view.qoi;
+}
+
 void DataWin_loadAudoIfNeeded(DataWin* dw, uint32_t audioEntryId) {
     Audo* a = &dw->audo;
     AudioEntry* entry = &a->entries[audioEntryId];
 
-    if (!entry->present || entry->dataSize == 0) return;
-    if (entry->data != nullptr) return;
+    if (!entry->present || entry->data != nullptr) return;
+
+    // With lazy metadata, the entry header has not been decoded yet.
+    if (entry->dataSize == 0 && entry->entryOffset != 0) {
+        if (dw->mappedFile) {
+            const uint8_t* header = dw->mappedFile + entry->entryOffset;
+            entry->dataSize = (uint32_t) header[0] | ((uint32_t) header[1] << 8) |
+                              ((uint32_t) header[2] << 16) | ((uint32_t) header[3] << 24);
+            entry->dataOffset = entry->entryOffset + 4;
+        } else if (dw->lazyLoadFile) {
+            long old_seek = ftell(dw->lazyLoadFile);
+            fseek(dw->lazyLoadFile, entry->entryOffset, SEEK_SET);
+            uint8_t sizeBytes[4];
+            if (fread(sizeBytes, 1, sizeof(sizeBytes), dw->lazyLoadFile) == sizeof(sizeBytes)) {
+                entry->dataSize = (uint32_t) sizeBytes[0] | ((uint32_t) sizeBytes[1] << 8) |
+                                  ((uint32_t) sizeBytes[2] << 16) | ((uint32_t) sizeBytes[3] << 24);
+                entry->dataOffset = (uint32_t) ftell(dw->lazyLoadFile);
+            }
+            fseek(dw->lazyLoadFile, old_seek, SEEK_SET);
+        } else {
+            logError("loadAudoIfNeeded: called without a lazy load file.\n");
+            return;
+        }
+    }
+
+    if (entry->dataSize == 0) return;
+
+    if (dw->mappedFile) {
+        // Small embedded sounds (text blips, footsteps) are replayed constantly.
+        // Keep a bounded copy in RAM so playback does not re-fault SD pages.
+        const size_t cacheMaxEntry = 64u * 1024u;
+        const size_t cacheMaxBytes = 8u * 1024u * 1024u;
+        if (entry->dataSize <= cacheMaxEntry &&
+            dw->audoOwnedBytes + entry->dataSize <= cacheMaxBytes) {
+            entry->data = (uint8_t *)safeMalloc(entry->dataSize);
+            memcpy(entry->data, dw->mappedFile + entry->dataOffset, entry->dataSize);
+            entry->dataOwned = true;
+            dw->audoOwnedBytes += entry->dataSize;
+        } else {
+            // Zero-copy: the decoder reads straight from the read-only mapping.
+            entry->data = dw->mappedFile + entry->dataOffset;
+        }
+        return;
+    }
 
     if (!dw->lazyLoadFile) {
         logError("loadAudoIfNeeded: called without a lazy load file.\n");
@@ -3153,15 +3478,23 @@ DataWin* DataWin_parse(const char* filePath, DataWinParserOptions options) {
     dw->lazyLoadAudio = options.lazyLoadAudio;
     if (options.lazyLoadRooms || options.lazyLoadTextures || options.lazyLoadAudio) {
         dw->lazyLoadFile = file;
+        // Needed by the seek bounds check in DataWin_loadRoomPayload/loadTxtr/loadAudo.
         dw->fileSize = (size_t) fileSize;
     } else {
         dw->lazyLoadFile = nullptr;
-        dw->fileSize = 0;
         fclose(file);
     }
+    // Used by unmapFile(), lazy readers and the auto-baker.
+    dw->fileSize = (size_t) fileSize;
+    dw->sourcePath = safeStrdup(filePath);
+    dw->autoBakeTextures = options.autoBakeTextures;
 
     if (options.loadType == DATAWINLOADTYPE_LOAD_IN_MEMORY_AHEAD_OF_TIME)
         free(wholeFileData);
+
+    if (!options.disableBakedTextures) {
+        loadBakedTextures(dw, filePath, fileSize);
+    }
 
     return dw;
 }
@@ -3384,7 +3717,18 @@ void DataWin_free(DataWin* dw) {
         dw->lazyLoadFile = nullptr;
     }
 
+    if (dw->autoBakeFile != nullptr) {
+        fclose(dw->autoBakeFile);
+        dw->autoBakeFile = nullptr;
+        if (dw->autoBakeCount > 0) {
+            logInfo("Auto-bake: added %u texture page(s) to the sidecar.\n", dw->autoBakeCount);
+        }
+    }
+    free(dw->autoBakeEntries);
+    free(dw->sourcePath);
+
     unmapFile(dw->mappedFile, dw->fileSize);
+    unmapFile(dw->bakedTextures, dw->bakedTexturesSize);
 
     free(dw);
 }

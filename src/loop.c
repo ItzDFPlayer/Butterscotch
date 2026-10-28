@@ -56,6 +56,7 @@
 #include "noop_renderer.h"
 #endif
 #include "overlay_file_system.h"
+#include "texture_baker.h"
 #if defined(USE_SDL1_AUDIO)
 #include "sdl_audio_system.h"
 #elif defined(USE_MINIAUDIO)
@@ -519,13 +520,313 @@ static void PreProcessedStuff_free(void) {
 #endif
 }
 
+// Deltarune keeps one shared save directory at the game root, while each chapter
+// ships its own data.win in a subdirectory (chapter3_windows/, ...). If the
+// directory above the WAD also contains a data.win (the chapter-select launcher),
+// use that directory for saves so every chapter and the selector see the same
+// files. Returns nullptr when the parent has no data.win (normal single-game ports).
+static char* resolveSharedSaveDir(const char* dataWinDir) {
+    if (dataWinDir == nullptr) return nullptr;
+
+    // Work on an absolute directory path: ports are often launched after a
+    // `cd` into the game folder with a bare "data.win" argument, which leaves
+    // dataWinDir as "./".
+    bool isAbsolute =
+        dataWinDir[0] == '/' || dataWinDir[0] == '\\'
+#ifdef _WIN32
+        || (dataWinDir[0] != '\0' && dataWinDir[1] == ':') // C:\...
+#endif
+        ;
+
+    char* absDir;
+    if (isAbsolute) {
+        absDir = safeStrdup(dataWinDir);
+    } else {
+        char cwd[4096];
+        if (getcwd(cwd, sizeof(cwd)) == nullptr) return nullptr;
+        size_t absLen = strlen(cwd) + 1 + strlen(dataWinDir) + 1;
+        absDir = (char *) safeMalloc(absLen);
+        snprintf(absDir, absLen, "%s/%s", cwd, dataWinDir);
+    }
+
+    // Remove trailing separators and a trailing "." component (cwd/./).
+    size_t len = strlen(absDir);
+    while (len > 0 && (absDir[len - 1] == '/' || absDir[len - 1] == '\\')) {
+        len--;
+    }
+    if (len >= 2 && absDir[len - 1] == '.' && (absDir[len - 2] == '/' || absDir[len - 2] == '\\')) {
+        len -= 2;
+    }
+    absDir[len] = '\0';
+    if (len == 0) {
+        free(absDir);
+        return nullptr;
+    }
+
+    // Find the start of the final path component. `sep` ends up just past the
+    // separator that precedes it (so it doubles as the parent's length).
+    size_t sep = len;
+    while (sep > 0 && absDir[sep - 1] != '/' && absDir[sep - 1] != '\\') {
+        sep--;
+    }
+    if (sep == 0) {
+        free(absDir);
+        return nullptr;
+    }
+
+    char* parentDir = (char *) safeMalloc(sep + 1);
+    memcpy(parentDir, absDir, sep);
+    parentDir[sep] = '\0';
+    free(absDir);
+
+    size_t probeLen = strlen(parentDir) + strlen("data.win") + 1;
+    char* probe = (char *) safeMalloc(probeLen);
+    snprintf(probe, probeLen, "%s%s", parentDir, "data.win");
+
+    FILE* probeFile = fopen(probe, "rb");
+    bool exists = probeFile != nullptr;
+    if (probeFile != nullptr) {
+        fclose(probeFile);
+    }
+    free(probe);
+
+    if (!exists) {
+        free(parentDir);
+        return nullptr;
+    }
+    return parentDir;
+}
+
+typedef struct {
+    Renderer* renderer;
+    int32_t width;
+    int32_t height;
+    bool graphical;
+} BakeProgressContext;
+
+static void onTextureBakeProgress(void* userData, uint32_t done, uint32_t total) {
+    BakeProgressContext* ctx = (BakeProgressContext*) userData;
+    float progress = total > 0 ? (float) done / (float) total : 1.0f;
+
+#ifdef ENABLE_SW_RENDERER
+    if (ctx->graphical && ctx->renderer != nullptr) {
+        SWRenderer_showLoadingProgress(ctx->renderer, ctx->width, ctx->height, progress);
+    }
+#endif
+
+    if (done == 0 || done == total || (done % 8) == 0) {
+        logInfo("Preparing textures: %u/%u\n", done, total);
+    }
+}
+
+#ifdef ENABLE_SW_RENDERER
+// Adds the texture page behind a TPAG item to the (deduplicated) list.
+static void prefetchAddTPag(DataWin* dw, int32_t tpagIndex, bool* seen, int32_t** pages) {
+    if (tpagIndex < 0 || (uint32_t) tpagIndex >= dw->tpag.count)
+        return;
+
+    int16_t pageId = dw->tpag.items[tpagIndex].texturePageId;
+    if (pageId < 0 || (uint32_t) pageId >= dw->txtr.count)
+        return;
+    if (seen[pageId])
+        return;
+
+    seen[pageId] = true;
+    arrput(*pages, (int32_t) pageId);
+}
+
+// Decodes the texture pages a room needs right after the room change, behind the
+// loading bar. Without this, the first frames of a large room stall for seconds
+// because each page (2048x2048, ~100 ms on a Cortex-A7) is decoded inside a draw
+// call the first time a sprite or tile on it is touched.
+//
+// Only content the camera can see (plus a margin, so scrolling does not page in
+// straight away) is prefetched: pulling in a whole large room would mean a much
+// longer bar for pages the player may never look at.
+static void prefetchRoomTextures(Runner* runner, Renderer* renderer, int32_t barW, int32_t barH) {
+    if (runner == nullptr || renderer == nullptr || runner->dataWin == nullptr)
+        return;
+
+    DataWin* dw = runner->dataWin;
+    Room* room = runner->currentRoom;
+    if (room == nullptr || dw->txtr.count == 0)
+        return;
+
+    // Visible room area, with a margin for the camera panning.
+    const float prefetchMargin = 256.0f;
+    bool filterToView = false;
+    float visX = 0.0f, visY = 0.0f, visW = (float) room->width, visH = (float) room->height;
+    if (runner->viewsEnabled) {
+        GMLCamera* camera = Runner_getCameraForView(runner, 0);
+        if (camera != nullptr && camera->viewWidth > 0 && camera->viewHeight > 0) {
+            visX = camera->viewX;
+            visY = camera->viewY;
+            visW = (float) camera->viewWidth;
+            visH = (float) camera->viewHeight;
+            filterToView = true;
+        }
+    }
+    if (filterToView) {
+        visX -= prefetchMargin;
+        visY -= prefetchMargin;
+        visW += prefetchMargin * 2.0f;
+        visH += prefetchMargin * 2.0f;
+    }
+
+    bool* seen = (bool*) safeCalloc(dw->txtr.count, sizeof(bool));
+    int32_t* pages = nullptr;
+
+    // Tiles are usually the bulk of a room's texture references.
+    for (uint32_t i = 0; i < room->tileCount; i++) {
+        RoomTile* tile = &room->tiles[i];
+        if (filterToView) {
+            float tileW = (float) tile->width * (tile->scaleX != 0.0f ? tile->scaleX : 1.0f);
+            float tileH = (float) tile->height * (tile->scaleY != 0.0f ? tile->scaleY : 1.0f);
+            if ((float) tile->x + tileW < visX || (float) tile->y + tileH < visY)
+                continue;
+            if ((float) tile->x > visX + visW || (float) tile->y > visY + visH)
+                continue;
+        }
+        prefetchAddTPag(dw, Renderer_resolveObjectTPAGIndex(dw, tile), seen, &pages);
+    }
+
+    // GMS1-style room backgrounds (they cover the room, so always keep them).
+    if (room->backgrounds != nullptr) {
+        for (int32_t i = 0; i < 8; i++) {
+            if (!room->backgrounds[i].enabled)
+                continue;
+            prefetchAddTPag(dw, Renderer_resolveBackgroundTPAGIndex(dw, room->backgrounds[i].backgroundDefinition), seen, &pages);
+        }
+    }
+
+    // The sprite frame each instance is currently showing.
+    for (ptrdiff_t i = 0; i < arrlen(runner->instances); i++) {
+        Instance* inst = runner->instances[i];
+        if (inst == nullptr || !inst->active || !inst->visible)
+            continue;
+        if (filterToView) {
+            float instX = (float) inst->x;
+            float instY = (float) inst->y;
+            if (instX < visX || instY < visY || instX > visX + visW || instY > visY + visH)
+                continue;
+        }
+        if (inst->spriteIndex < 0 || (uint32_t) inst->spriteIndex >= dw->sprt.count)
+            continue;
+
+        Sprite* spr = &dw->sprt.sprites[inst->spriteIndex];
+        if (spr->textureCount == 0)
+            continue;
+
+        int32_t frame = (int32_t) inst->imageIndex;
+        if (frame < 0 || (uint32_t) frame >= spr->textureCount)
+            frame = 0;
+
+        prefetchAddTPag(dw, spr->tpagIndices[frame], seen, &pages);
+    }
+
+    free(seen);
+
+    ptrdiff_t pageCount = arrlen(pages);
+    if (pageCount <= 0) {
+        arrfree(pages);
+        return;
+    }
+
+    // Only prefetch when the room actually fits: otherwise the pages would evict
+    // each other and the work is wasted (the lazy path handles that case).
+    int subPageCount = 0;
+    uint64_t requiredBytes = 0;
+    for (ptrdiff_t i = 0; i < pageCount; i++) {
+        if (SWRenderer_pageIsSubPage(renderer, pages[i]))
+            subPageCount++;
+        requiredBytes += SWRenderer_estimateTexturePageBytes(renderer, pages[i]);
+    }
+
+    if (subPageCount == (int) pageCount) {
+        // These pages are decoded per strip as they are drawn, so there is nothing
+        // worth prefetching and no full page ever has to be resident.
+        arrfree(pages);
+        return;
+    }
+
+    SWRendererTextureStats stats;
+    SWRenderer_getTextureStats(renderer, &stats);
+
+    if (requiredBytes > (uint64_t) stats.budgetBytes) {
+        logInfo("Room \"%s\" needs %llu MB of textures (cache %u MB); keeping lazy loading for it\n",
+                room->name,
+                (unsigned long long) (requiredBytes / (1024ull * 1024ull)),
+                stats.budgetBytes / (1024u * 1024u));
+        arrfree(pages);
+        return;
+    }
+
+    uint64_t startedAt = nowNanos();
+    int decoded = 0;
+    int32_t total = (int32_t) pageCount;
+
+    SWRenderer_showLoadingProgress(renderer, barW, barH, 0.0f);
+    for (int32_t i = 0; i < total; i++) {
+        if (SWRenderer_prefetchTexturePage(renderer, pages[i]))
+            decoded++;
+        SWRenderer_showLoadingProgress(renderer, barW, barH, (float) (i + 1) / (float) total);
+    }
+
+    double elapsedMs = (double) (nowNanos() - startedAt) / 1000000.0;
+    logInfo("Prefetched %d/%d texture pages for room \"%s\" in %.0f ms\n",
+            decoded, total, room->name, elapsedMs);
+
+    arrfree(pages);
+}
+#endif /* ENABLE_SW_RENDERER */
+
 // ===[ MAIN ]===
 int loop(CommandLineArgs args, const char *argv0) {
+    // The Miyoo release launcher only passes "--renderer software data.win". The
+    // eager defaults (whole data.win in RAM, every AUDO/TXTR/ROOM payload parsed up
+    // front) cannot fit Chapters 3+ in 128 MB. Default to a memory-mapped data.win
+    // and lazy rooms unless the user explicitly chose something else.
+    if (args.bakeTexturesPath != nullptr) {
+        return TextureBaker_bake(args.dataWinPath, args.bakeTexturesPath, nullptr, nullptr);
+    }
+
+    if (args.renderer == SOFTWARE) {
+        if (!args.loadTypeExplicit) {
+            args.loadType = DATAWINLOADTYPE_MAP_FILE;
+        }
+        if (!args.lazyRoomsExplicit) {
+            args.lazyRooms = true;
+        }
+        // With a mapped WAD these defer the AUDO/TXTR chunk walks to first use and
+        // decode straight from the (reclaimable) mapping instead of the heap.
+        if (!args.lazyTexturesExplicit) {
+            args.lazyTextures = true;
+        }
+        if (!args.lazyAudioExplicit) {
+            args.lazyAudio = true;
+        }
+        logInfo("Low-memory defaults: load-type=%s, lazy-rooms=%s, lazy-textures=%s, lazy-audio=%s\n",
+                args.loadType == DATAWINLOADTYPE_MAP_FILE ? "map-file" :
+                args.loadType == DATAWINLOADTYPE_LOAD_PER_CHUNK ? "load-per-chunk" : "load-in-memory-ahead-of-time",
+                args.lazyRooms ? "on" : "off",
+                args.lazyTextures ? "on" : "off",
+                args.lazyAudio ? "on" : "off");
+    }
 #ifdef _WIN32
     timeBeginPeriod(1);
 #endif
-    char* currentDataWinPath = safeStrdup(args.dataWinPath);
-    char** currentGameArgs = args.gameArgs;
+
+    // Decode a room's texture pages right after the room change instead of
+    // letting the first draw calls stall on them. Disable with BUTTERSCOTCH_NO_PREFETCH=1.
+    bool prefetchTextures = true;
+    {
+        const char* noPrefetch = getenv("BUTTERSCOTCH_NO_PREFETCH");
+        if (noPrefetch != nullptr && noPrefetch[0] != '\0' && noPrefetch[0] != '0') {
+            prefetchTextures = false;
+        }
+    }
+
+    char* currentDataWinPath = safeStrdup(args.dataWinPath);    char** currentGameArgs = args.gameArgs;
     repeat(arrlen(args.gameArgs), i) {
         arrput(currentGameArgs, args.gameArgs[i]);
     }
@@ -596,6 +897,7 @@ int loop(CommandLineArgs args, const char *argv0) {
 #endif
         options.skipLoadingPreciseMasksForNonPreciseSprites = true;
         options.loadType = args.loadType;
+        options.autoBakeTextures = (args.renderer == SOFTWARE) && !args.disableAutoBakeTextures;
         options.lazyLoadRooms = args.lazyRooms;
         options.lazyLoadTextures = args.lazyTextures;
         options.lazyLoadAudio = args.lazyAudio;
@@ -963,6 +1265,26 @@ int loop(CommandLineArgs args, const char *argv0) {
             }
         }
 #endif
+
+        // Prepare every texture page before the game starts so the first session
+        // does not pay BZip2 per room. Skipped when the sidecar is already complete,
+        // and while headless (tests/CI).
+        if (!args.headless && args.renderer == SOFTWARE && !args.disableAutoBakeTextures &&
+            dataWin->sourcePath != nullptr && !TextureBaker_isComplete(dataWin->sourcePath)) {
+            size_t sidecarLen = strlen(dataWin->sourcePath) + 5;
+            char* sidecarPath = (char *) safeMalloc(sidecarLen);
+            snprintf(sidecarPath, sidecarLen, "%s.bsq", dataWin->sourcePath);
+
+            BakeProgressContext bakeCtx = { renderer, windowW, windowH, renderer != nullptr };
+            int bakeResult = TextureBaker_bake(dataWin->sourcePath, sidecarPath, onTextureBakeProgress, &bakeCtx);
+            free(sidecarPath);
+
+            if (bakeResult == 0) {
+                DataWin_refreshBakedTextures(dataWin);
+            } else {
+                logWarn("Texture pre-bake failed; continuing without it.\n");
+            }
+        }
 
         // Initialize the audio system
         AudioSystem* audioSystem = nullptr;

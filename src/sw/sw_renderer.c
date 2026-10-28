@@ -8,6 +8,46 @@
 #include "sw_renderer_private.h"
 
 void platformSetNextFramebuffer(uintpixel_t* framebuffer, int width, int height);
+void platformSwapBuffers(void);
+
+// Pick a decoded-texture budget that fits the device. Deltarune rooms commonly
+// touch five or six 2048x2048 pages (40-48 MB), so smaller budgets evict/reload a
+// page every cycle. 48 MB fits that working set on a 128 MB Miyoo while leaving
+// room for the heap and decode scratch buffers; larger machines get extra room.
+static unsigned long swrReadMemTotalKb(void) {
+#if defined(__linux__)
+    FILE* meminfo = fopen("/proc/meminfo", "r");
+    if (meminfo != NULL) {
+        char line[128];
+        unsigned long kb = 0;
+        while (fgets(line, sizeof(line), meminfo) != NULL) {
+            if (sscanf(line, "MemTotal: %lu kB", &kb) == 1) {
+                break;
+            }
+        }
+        fclose(meminfo);
+        return kb;
+    }
+#endif
+    return 0;
+}
+
+static size_t swrDefaultTextureBudget(unsigned long memTotalKb) {
+    // 48 MB fits the six 2048x2048 pages that a Deltarune room commonly touches.
+    if (memTotalKb > 0 && memTotalKb <= 192ul * 1024ul) {
+        return 48u * 1024u * 1024u;
+    }
+    return 64u * 1024u * 1024u;
+}
+
+static size_t swrMaxTextureBudget(unsigned long memTotalKb) {
+    // Allow the cache to grow one/two pages when a scene's working set exceeds
+    // the initial budget, while keeping headroom for the heap and OS.
+    if (memTotalKb > 0 && memTotalKb <= 192ul * 1024ul) {
+        return 64u * 1024u * 1024u;
+    }
+    return 256u * 1024u * 1024u;
+}
 
 static void SWRenderer_init(Renderer* renderer, DataWin* dataWin)
 {
@@ -22,10 +62,37 @@ static void SWRenderer_init(Renderer* renderer, DataWin* dataWin)
     swr->textures = (SWTexture**) safeCalloc(swr->totalTextureCount, sizeof(SWTexture*));
     swr->surfaces = (SWSurface**) safeCalloc(swr->surfaceCount, sizeof(SWSurface*));
     
-    //allocate texture LRU cache to allow for dynamic unloading of textures
-    swr->textureIndexLRU = (uint32_t*) safeCalloc(TEXTURE_LRU_LENGTH, sizeof(uint32_t));
-    swr->textureIndexLRUHead = 0;
-    swr->textureIndexLRUTail = 0;
+    swr->textureUseClock = 0;
+    swr->textureBytes = 0;
+    swr->recentEvictedNext = 0;
+    for (int i = 0; i < 8; i++) {
+        swr->recentEvictedPages[i] = UINT32_MAX;
+        swr->recentEvictedTicks[i] = 0;
+    }
+
+    unsigned long memTotalKb = swrReadMemTotalKb();
+    swr->textureBudgetBytes = swrDefaultTextureBudget(memTotalKb);
+    swr->textureBudgetMax = swrMaxTextureBudget(memTotalKb);
+    const char* textureBudgetEnv = getenv("BUTTERSCOTCH_TEXTURE_MB");
+    if (textureBudgetEnv != NULL && textureBudgetEnv[0] != '\0') {
+        long mb = strtol(textureBudgetEnv, NULL, 10);
+        if (mb > 0) {
+            swr->textureBudgetBytes = (size_t) mb * 1024 * 1024;
+        }
+    }
+    const char* textureMaxEnv = getenv("BUTTERSCOTCH_TEXTURE_MAX_MB");
+    if (textureMaxEnv != NULL && textureMaxEnv[0] != '\0') {
+        long mb = strtol(textureMaxEnv, NULL, 10);
+        if (mb > 0) {
+            // Explicit maximum disables (or bounds) adaptive growth.
+            swr->textureBudgetMax = (size_t) mb * 1024 * 1024;
+        }
+    }
+    if (swr->textureBudgetMax < swr->textureBudgetBytes) {
+        swr->textureBudgetMax = swr->textureBudgetBytes;
+    }
+    fprintf(stderr, "SWR: texture cache budget: %zu MB (max %zu MB)\n",
+            swr->textureBudgetBytes / (1024 * 1024), swr->textureBudgetMax / (1024 * 1024));
     
     //HACK: this isn't good, really.  This should seriously be refactored.
     //expand datawin's tpag items list to include our surface count.
@@ -87,6 +154,138 @@ static void SWRenderer_endFrameEnd(Renderer* renderer)
     assert(!swr->drawingToSurface);
     platformSetNextFramebuffer(swr->fb, swr->width, swr->height);
 }
+
+static uintpixel_t swrLoadingColor(uint8_t r, uint8_t g, uint8_t b)
+{
+    return swrConvertPixel((uint32_t) r | ((uint32_t) g << 8) | ((uint32_t) b << 16));
+}
+
+void SWRenderer_showLoadingProgress(Renderer* renderer, int32_t width, int32_t height, float progress)
+{
+    if (renderer == NULL || renderer->vtable == NULL || width <= 0 || height <= 0) return;
+
+    if (renderer->vtable->beginFrame != NULL) {
+        renderer->vtable->beginFrame(renderer, width, height, width, height);
+    }
+
+    SWRenderer* swr = (SWRenderer*) renderer;
+    if (swr->fb == NULL || swr->width == 0 || swr->height == 0 || swr->fbPitch == 0) return;
+
+    uintpixel_t background = swrLoadingColor(12, 12, 18);
+    uintpixel_t border = swrLoadingColor(90, 90, 110);
+    uintpixel_t track = swrLoadingColor(30, 40, 60);
+    uintpixel_t fill = swrLoadingColor(110, 190, 255);
+
+    int w = swr->width;
+    int h = swr->height;
+    size_t pitch = swr->fbPitch;
+    uintpixel_t* fb = swr->fb;
+
+    for (int y = 0; y < h; y++) {
+        uintpixel_t* row = fb + (size_t) y * pitch;
+        for (int x = 0; x < w; x++) row[x] = background;
+    }
+
+    int barW = w * 3 / 4;
+    int barH = h / 20;
+    if (barH < 6) barH = 6;
+    if (barW < 16) barW = w - 8;
+    int x0 = (w - barW) / 2;
+    int y0 = (h - barH) / 2;
+
+    for (int y = y0 - 2; y < y0 + barH + 2; y++) {
+        if (y < 0 || y >= h) continue;
+        uintpixel_t* row = fb + (size_t) y * pitch;
+        for (int x = x0 - 2; x < x0 + barW + 2; x++) {
+            if (x >= 0 && x < w) row[x] = border;
+        }
+    }
+    for (int y = y0; y < y0 + barH; y++) {
+        uintpixel_t* row = fb + (size_t) y * pitch;
+        for (int x = x0; x < x0 + barW; x++) row[x] = track;
+    }
+
+    float p = progress;
+    if (p < 0.0f) p = 0.0f;
+    if (p > 1.0f) p = 1.0f;
+    int filled = (int) (barW * p + 0.5f);
+    for (int y = y0; y < y0 + barH; y++) {
+        uintpixel_t* row = fb + (size_t) y * pitch;
+        for (int x = x0; x < x0 + filled; x++) row[x] = fill;
+    }
+
+    platformSetNextFramebuffer(fb, w, h);
+    platformSwapBuffers();
+}
+
+void SWRenderer_getTextureStats(Renderer* renderer, SWRendererTextureStats* out)
+{
+    if (out == NULL) return;
+    out->textureBytes = 0;
+    out->budgetBytes = 0;
+    out->loads = 0;
+    out->evictions = 0;
+    if (renderer == NULL) return;
+
+    SWRenderer* swr = (SWRenderer*) renderer;
+    out->textureBytes = (uint32_t) swr->textureBytes;
+    out->budgetBytes = (uint32_t) swr->textureBudgetBytes;
+    out->loads = swr->textureLoads;
+    out->evictions = swr->textureEvictions;
+    out->drawsAttempted = swr->drawsAttempted;
+    out->drawsCulled = swr->drawsCulled;
+}
+
+bool SWRenderer_prefetchTexturePage(Renderer* renderer, int32_t pageId)
+{
+    if (renderer == NULL) return false;
+
+    SWRenderer* swr = (SWRenderer*) renderer;
+    if (pageId < 0 || (uint32_t) pageId >= swr->textureCount) return false;
+    if (swr->textures[pageId] != NULL) return true; // already resident
+
+    // Sub-page pages decode per strip when drawn, which costs a fraction of a
+    // whole page; materialising all of it here would undo the memory saving.
+    if (SWRenderer_pageIsSubPage(renderer, pageId)) return true;
+
+    return swrEnsureTextureIsLoaded(swr, (uint32_t) pageId);
+}
+
+bool SWRenderer_pageIsSubPage(Renderer* renderer, int32_t pageId)
+{
+    if (renderer == NULL || renderer->dataWin == NULL) return false;
+    BakedPageView view;
+    return DataWin_getBakedPage(renderer->dataWin, pageId, &view) && view.checkpoints != NULL;
+}
+
+uint32_t SWRenderer_estimateTexturePageBytes(Renderer* renderer, int32_t pageId)
+{
+    if (renderer == NULL || renderer->dataWin == NULL) return 0;
+
+    DataWin* dw = renderer->dataWin;
+    if (pageId < 0 || (uint32_t) pageId >= dw->txtr.count) return 0;
+
+    Texture* txtr = &dw->txtr.textures[pageId];
+    if (txtr->textureWidth > 0 && txtr->textureHeight > 0) {
+        return (uint32_t) txtr->textureWidth * (uint32_t) txtr->textureHeight * (uint32_t) sizeof(uintpixel_t);
+    }
+
+    // Older WAD versions do not store the page size in TXTR; read it from the
+    // baked QOI header instead, which needs no decoding.
+    size_t bakedSize = 0;
+    const uint8_t* baked = DataWin_getBakedTexture(dw, pageId, &bakedSize);
+    if (baked != NULL && bakedSize >= 8) {
+        uint32_t w = (uint32_t) baked[4] | ((uint32_t) baked[5] << 8);
+        uint32_t h = (uint32_t) baked[6] | ((uint32_t) baked[7] << 8);
+        if (w > 0 && h > 0) {
+            return w * h * (uint32_t) sizeof(uintpixel_t);
+        }
+    }
+
+    // Unknown: assume a full-size page so the fit check stays conservative.
+    return 2048u * 2048u * (uint32_t) sizeof(uintpixel_t);
+}
+
 
 static void SWRenderer_beginView(Renderer* renderer, int32_t viewX, int32_t viewY, int32_t viewW, int32_t viewH,
                                  int32_t portX, int32_t portY, int32_t portW, int32_t portH, float viewAngle)

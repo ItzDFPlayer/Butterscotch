@@ -16,8 +16,12 @@
 #endif
 
 // Configurable Properties
-#define TEXTURE_LRU_LENGTH 64
 #define SURFACE_MAX_COUNT 64
+// Decoded texture pages are held in RAM (16bpp). Deltarune uses 2048x2048 pages
+// (8 MB each), so limiting by entry count (64) could pin ~512 MB and OOM a 128 MB
+// device. The cache is capped by bytes instead; the budget is chosen at runtime
+// (48 MB on 128 MB devices, 64 MB otherwise) and can be overridden with
+// BUTTERSCOTCH_TEXTURE_MB.
 // (NOTE: See PIXEL_SIZE in defines.h)
 
 
@@ -26,6 +30,18 @@ typedef struct
 {
     uintpixel_t* buffer;
     uint16_t width, height;
+    size_t byteSize;
+    // Monotonic use counter; the lowest value is evicted first. Updated every
+    // time a page is touched by a draw, not just when it is decoded, so pages
+    // used every frame (fonts/UI) are not evicted ahead of background pages.
+    uint64_t lastUsedTick;
+    // Sub-page residency: when stripCount > 0 the buffer was calloc'd and only
+    // the strips in `stripsLoaded` have been decoded into it. byteSize then
+    // tracks the resident (decoded) bytes, not the full page. Non-sparse
+    // textures have stripCount == 0 and are always fully resident.
+    uint32_t stripsLoaded;
+    uint16_t stripRows;
+    uint16_t stripCount;
 }
 SWTexture;
 
@@ -67,12 +83,25 @@ typedef struct
     
     SWTexture** textures;
     SWSurface** surfaces;
-    uint32_t* textureIndexLRU;
-    uint32_t textureIndexLRUHead;
-    uint32_t textureIndexLRUTail;
+    uint64_t textureUseClock;
     size_t textureCount;
     size_t surfaceCount;
     size_t totalTextureCount;
+    size_t textureBytes;       // decoded bytes currently resident in the cache
+    size_t textureBudgetBytes; // current cap for decoded texture bytes
+    size_t textureBudgetMax;   // hard cap; raised when a page is evicted and
+                               // immediately needed again (working set > budget)
+    // Cumulative cache churn counters, reported by --perf-log.
+    uint32_t textureLoads;
+    uint32_t textureEvictions;
+    // Draw culling counters: how many sprite/tile draws were skipped because
+    // they were entirely outside the current viewport.
+    uint64_t drawsAttempted;
+    uint64_t drawsCulled;
+    // Recently evicted pages, used to detect thrashing.
+    uint32_t recentEvictedPages[8];
+    uint64_t recentEvictedTicks[8];
+    int recentEvictedNext;
     size_t originalTPagCount;
     size_t originalSpriteCount;
     

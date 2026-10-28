@@ -9,6 +9,7 @@
 #include "string_compat.h"
 
 #include "utils.h"
+#include "baked_textures.h"
 
 // Forward declaration for progress callback
 typedef struct DataWin DataWin;
@@ -52,6 +53,11 @@ typedef struct {
     bool lazyLoadTextures;
     // If true, AUDO objects will be loaded on demand via DataWin_loadAudoIfNeeded.
     bool lazyLoadAudio;
+    // Skip mapping a <data.win>.bsq sidecar (used by the texture baker).
+    bool disableBakedTextures;
+    // While playing, append freshly decoded QOI pages to <data.win>.bsq so the
+    // next launch can skip BZip2. Enabled for the software renderer by default.
+    bool autoBakeTextures;
 
     // When lazyLoadRooms is true, this list indicates which rooms should be loaded during load time instead of demand. They will also not be freed.
     StringBooleanEntry* eagerlyLoadedRooms;
@@ -949,6 +955,22 @@ struct DataWin {
     bool lazyLoadRooms; // mirrors the parser option so Runner can branch without re-reading options
     bool lazyLoadTextures; // ditto, but with TXTR pages
     bool lazyLoadAudio; // ditto, but with AUDO entries
+    size_t audoOwnedBytes; // bytes copied out of the mapping by the small-audio cache
+
+    // Optional pre-baked texture sidecar (<data.win>.bsq), mapped read-only.
+    uint8_t* bakedTextures;
+    size_t bakedTexturesSize;
+    BakedTexturesHeader* bakedTexturesHeader;
+    BakedTextureEntry* bakedTextureEntries;
+
+    // Incremental auto-baker: appends QOI pages to <data.win>.bsq while playing.
+    char* sourcePath;                 // owned copy of the data.win path
+    bool autoBakeTextures;            // parser option
+    bool autoBakeFailed;              // sidecar not writable/IO error; disable for this run
+    FILE* autoBakeFile;               // write handle, opened on the first baked page
+    BakedTextureEntry* autoBakeEntries; // session view of the index (pageCount entries)
+    size_t autoBakeAppendOffset;
+    uint32_t autoBakeCount;
 };
 
 DataWin* DataWin_parse(const char* filePath, DataWinParserOptions options);
@@ -972,5 +994,29 @@ void GamePath_computeInternal(GamePath* path);
 PathPositionResult GamePath_getPosition(GamePath* path, float t);
 void DataWin_loadTxtrIfNeeded(DataWin* dw, uint32_t textureId);
 void DataWin_loadAudoIfNeeded(DataWin* dw, uint32_t audioEntryId);
+// Returns the baked QOI blob for a texture page, or nullptr when not baked/present.
+// Describes a baked texture page: the plain QOI data plus, for sidecars written
+// by current bakers, one decoder checkpoint per horizontal strip (allowing the
+// renderer to decode a single strip instead of the whole page).
+typedef struct {
+    const uint8_t* qoi;
+    size_t qoiSize;
+    const QoiCheckpoint* checkpoints; // NULL for legacy flat "fioq" blobs
+    int stripCount;
+    int stripRows;
+    int width;
+    int height;
+} BakedPageView;
+
+const uint8_t* DataWin_getBakedTexture(DataWin* dw, uint32_t pageId, size_t* outSize);
+
+// Fills `out` with the page's QOI data and strip checkpoints. Returns false when
+// the page is not baked or the entry is malformed.
+bool DataWin_getBakedPage(DataWin* dw, uint32_t pageId, BakedPageView* out);
+
+// Appends an already-decoded QOI page to <data.win>.bsq (no-op when disabled).
+void DataWin_autoBakeTexture(DataWin* dw, uint32_t pageId, const uint8_t* qoi, size_t qoiSize);
+// Re-maps <data.win>.bsq after a full bake pass added pages this session.
+void DataWin_refreshBakedTextures(DataWin* dw);
 
 #endif /* _BS_DATA_WIN_H_ */

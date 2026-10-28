@@ -117,6 +117,11 @@ typedef struct {
     bool traceEventInherited;
     const char* recordInputsPath;
     const char* playbackInputsPath;
+    const char* bakeTexturesPath; // non-null = bake textures and exit
+    bool disableAutoBakeTextures; // do not fill <data.win>.bsq while playing
+    const char* logFilePath; // non-null = mirror console logs into this file
+    const char* perfLogPath; // non-null = write a frame performance log here
+    int perfLogSlowMs; // --perf-log: frames at or above this time are logged
     enum GraphicsAPI renderer;
     YoYoOperatingSystem osType;
     int32_t windowWidth, windowHeight; // 0 = auto (gen8 default, or the console-native size for console os-types)

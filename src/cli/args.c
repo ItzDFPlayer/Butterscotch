@@ -90,6 +90,11 @@ static void printUsage(const char *argv0) {
 #endif
         "    --lazy-audio                           - Load audio into RAM on first use, reducing memory usage\n"
         "    --load-type <type>                     - Specify how data.win is loaded, per-chunk or all at once\n"
+        "    --bake-textures <file>                 - Pre-decompress TXTR bzip2 blobs into a .bsq sidecar and exit\n"
+        "    --no-auto-bake-textures                - Disable filling <data.win>.bsq while playing\n"
+        "    --log-file <file>                      - Mirror all log output into a text file\n"
+        "    --perf-log <file>                      - Write a shareable frame performance log (slow frames, room changes, GML hotspots)\n"
+        "    --perf-log-slow-ms <ms>                - Frame time considered slow by --perf-log (default 50)\n"
         "    --disable-log-colours                  - Disable colours for warning, error, and debug logs\n"
         "    --disable-log-colors                   - Same as --disable-log-colours, but different spelling\n"
 #ifdef ENABLE_VM_OPCODE_PROFILER
@@ -164,6 +169,11 @@ void parseCommandLineArgs(CommandLineArgs* args, int argc, char* argv[]) {
 #endif
         {"lazy-audio", no_argument, nullptr, 'K'},
         {"load-type", required_argument, nullptr, 999},
+        {"bake-textures", required_argument, nullptr, 1004},
+        {"no-auto-bake-textures", no_argument, nullptr, 1005},
+        {"log-file", required_argument, nullptr, 1006},
+        {"perf-log", required_argument, nullptr, 1007},
+        {"perf-log-slow-ms", required_argument, nullptr, 1008},
         {"disable-log-colours", no_argument, nullptr, 1003},
         {"disable-log-colors", no_argument, nullptr, 1003},
 #ifdef ENABLE_VM_OPCODE_PROFILER
@@ -519,6 +529,28 @@ void parseCommandLineArgs(CommandLineArgs* args, int argc, char* argv[]) {
             case 1003:
                 args->disableLogColours = true;
                 break;
+            case 1004:
+                args->bakeTexturesPath = optarg;
+                break;
+            case 1005:
+                args->disableAutoBakeTextures = true;
+                break;
+            case 1006:
+                args->logFilePath = optarg;
+                break;
+            case 1007:
+                args->perfLogPath = optarg;
+                break;
+            case 1008: {
+                char* endPtr = nullptr;
+                long ms = strtol(optarg, &endPtr, 10);
+                if (endPtr == optarg || *endPtr != '\0' || ms < 1 || ms > 10000) {
+                    logError("Invalid --perf-log-slow-ms value '%s' (expected 1..10000)\n", optarg);
+                    exit(1);
+                }
+                args->perfLogSlowMs = (int) ms;
+                break;
+            }
             default:
                 printUsage(argv[0]);
                 exit(1);
