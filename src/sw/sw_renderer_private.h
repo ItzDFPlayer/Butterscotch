@@ -104,6 +104,8 @@ typedef struct
     uint64_t pxWritten;
     uint64_t pxFastCopy;
     uint64_t pxVectorBlend;
+    uint64_t pxScalarBlend; // blended pixels that still ran through the scalar loop
+    uint64_t pxRotated;     // pixels covered by rotated sprites (area of their bounds)
     // Recently evicted pages, used to detect thrashing.
     uint32_t recentEvictedPages[8];
     uint64_t recentEvictedTicks[8];

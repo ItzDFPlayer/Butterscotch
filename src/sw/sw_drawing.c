@@ -350,8 +350,14 @@ FORCE_INLINE swrVec8 swrSplat8(uint16_t value)
     return out;
 }
 
+FORCE_INLINE swrVec8 swrMinVec(swrVec8 a, swrVec8 b)
+{
+    swrVec8 lower = (a < b);
+    return (a & lower) | (b & ~lower);
+}
+
 FORCE_INLINE swrVec8 swrBlendVec(swrVec8 src, swrVec8 dst, swrVec8 tintR, swrVec8 tintG, swrVec8 tintB,
-                                 bool applyTint, int srcalpha, int dstalpha)
+                                 bool applyTint, bool additive, int srcalpha, int dstalpha)
 {
     const swrVec8 mask5 = swrSplat8(0x1F);
     const swrVec8 srcAlpha = swrSplat8((uint16_t) srcalpha);
@@ -375,9 +381,23 @@ FORCE_INLINE swrVec8 swrBlendVec(swrVec8 src, swrVec8 dst, swrVec8 tintR, swrVec
     swrVec8 dg = (dst >> 5) & mask5;
     swrVec8 db = dst & mask5;
 
-    swrVec8 r = (dr * dstAlpha + sr * srcAlpha) >> 8;
-    swrVec8 g = (dg * dstAlpha + sg * srcAlpha) >> 8;
-    swrVec8 b = (db * dstAlpha + sb * srcAlpha) >> 8;
+    swrVec8 r, g, b;
+    if (additive)
+    {
+        // bm_add: destination plus the (alpha-weighted) source, saturated per
+        // channel. The scalar path lets the 5-bit channels overflow into their
+        // neighbours instead of clamping; clamping is what the effect is supposed
+        // to look like and it is free here.
+        r = swrMinVec(dr + ((sr * srcAlpha) >> 8), mask5);
+        g = swrMinVec(dg + ((sg * srcAlpha) >> 8), mask5);
+        b = swrMinVec(db + ((sb * srcAlpha) >> 8), mask5);
+    }
+    else
+    {
+        r = (dr * dstAlpha + sr * srcAlpha) >> 8;
+        g = (dg * dstAlpha + sg * srcAlpha) >> 8;
+        b = (db * dstAlpha + sb * srcAlpha) >> 8;
+    }
 
     swrVec8 blended = opaqueBit | (r << 10) | (g << 5) | b;
 
@@ -387,12 +407,21 @@ FORCE_INLINE swrVec8 swrBlendVec(swrVec8 src, swrVec8 dst, swrVec8 tintR, swrVec
     return (blended & keepMask) | (dst & ~keepMask);
 }
 
-// True when the vector kernel produces the same pixels as the scalar path.
+// True when the vector kernel handles this blend. bm_normal reproduces the scalar
+// output exactly; bm_add clamps instead of letting 5-bit channels overflow. That is
+// the only intentional difference in output, and it fixes a channel-bleed artefact
+// rather than introducing one.
 FORCE_INLINE bool swrCanBlendVector(const SWRenderer* swr, int srcalpha, int dstalpha)
 {
-    return swr->blendMode == bm_normal &&
-           srcalpha > 0 && srcalpha <= 256 &&
-           dstalpha == 256 - srcalpha;
+    if (srcalpha <= 0 || srcalpha > 256) return false;
+    if (swr->blendMode == bm_normal) return dstalpha == 256 - srcalpha;
+    if (swr->blendMode == bm_add) return dstalpha == 256;
+    return false;
+}
+
+FORCE_INLINE bool swrBlendIsAdditive(const SWRenderer* swr)
+{
+    return swr->blendMode == bm_add;
 }
 
 // Blends a scaled (nearest-neighbour) sprite rectangle eight pixels at a time.
@@ -406,6 +435,7 @@ static void swrBlendSpriteScaledVector(SWRenderer* swr, int dx, int dy, int dw, 
                                        uintpixel_t tintColor, int srcalpha, int dstalpha)
 {
     const bool applyTint = !swrTintIsWhite(tintColor);
+    const bool additive = swrBlendIsAdditive(swr);
     const swrVec8 tintR = swrSplat8((uint16_t) ((tintColor >> 10) & 0x1F));
     const swrVec8 tintG = swrSplat8((uint16_t) ((tintColor >> 5) & 0x1F));
     const swrVec8 tintB = swrSplat8((uint16_t) (tintColor & 0x1F));
@@ -436,7 +466,7 @@ static void swrBlendSpriteScaledVector(SWRenderer* swr, int dx, int dy, int dw, 
             memcpy(&s, gathered, sizeof(s));
             memcpy(&d, dstline + x, sizeof(d));
 
-            swrVec8 out = swrBlendVec(s, d, tintR, tintG, tintB, applyTint, srcalpha, dstalpha);
+            swrVec8 out = swrBlendVec(s, d, tintR, tintG, tintB, applyTint, additive, srcalpha, dstalpha);
             memcpy(dstline + x, &out, sizeof(out));
         }
 
@@ -456,6 +486,7 @@ static void swrBlendSpriteVector(SWRenderer* swr, int dx, int dy, int dw, int dh
                                  uintpixel_t tintColor, int srcalpha, int dstalpha)
 {
     const bool applyTint = !swrTintIsWhite(tintColor);
+    const bool additive = swrBlendIsAdditive(swr);
     const swrVec8 tintR = swrSplat8((uint16_t) ((tintColor >> 10) & 0x1F));
     const swrVec8 tintG = swrSplat8((uint16_t) ((tintColor >> 5) & 0x1F));
     const swrVec8 tintB = swrSplat8((uint16_t) (tintColor & 0x1F));
@@ -472,7 +503,7 @@ static void swrBlendSpriteVector(SWRenderer* swr, int dx, int dy, int dw, int dh
             memcpy(&s, srcline + x, sizeof(s));
             memcpy(&d, dstline + x, sizeof(d));
 
-            swrVec8 out = swrBlendVec(s, d, tintR, tintG, tintB, applyTint, srcalpha, dstalpha);
+            swrVec8 out = swrBlendVec(s, d, tintR, tintG, tintB, applyTint, additive, srcalpha, dstalpha);
             memcpy(dstline + x, &out, sizeof(out));
         }
         for (; x < dw; x++)
@@ -602,6 +633,8 @@ static void swrDrawSpriteInternal(
         }
         else
         {
+            swr->pxScalarBlend += (uint64_t) dw * (uint64_t) dh;
+
             for (int y = 0; y < dh; y++)
             {
                 const uintpixel_t* srcline = &texture->buffer[(sy + y) * texture->width + sx];
@@ -619,6 +652,7 @@ static void swrDrawSpriteInternal(
     else
     {
         swr->pxWritten += (uint64_t) dw * (uint64_t) dh;
+        if (!plainCopy) swr->pxScalarBlend += (uint64_t) dw * (uint64_t) dh;
 
         fixedp_t ys2 = iys2;
         for (int y = 0, ys = iys; y < dh; y++, ys += oys, ys2 += oys2)
@@ -707,6 +741,8 @@ static void swrDrawSpriteRotatedInternal(
     // some final clip checks
     if (minXc >= maxXc || minYc >= maxYc) return;
     
+    swr->pxRotated += (uint64_t) (maxXc - minXc) * (uint64_t) (maxYc - minYc);
+
     int sox = flipX ? sw - 1 : 0;
     int soy = flipY ? sh - 1 : 0;
     int six = flipX ? -1 : 1;

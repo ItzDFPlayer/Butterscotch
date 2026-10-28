@@ -23,6 +23,8 @@ typedef struct {
     uint64_t pxWritten;
     uint64_t pxFastCopy;
     uint64_t pxVectorBlend;
+    uint64_t pxScalarBlend;
+    uint64_t pxRotated;
 } SWRendererTextureStats;
 
 void SWRenderer_getTextureStats(Renderer* renderer, SWRendererTextureStats* out);

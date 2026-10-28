@@ -237,6 +237,8 @@ void SWRenderer_getTextureStats(Renderer* renderer, SWRendererTextureStats* out)
     out->pxWritten = swr->pxWritten;
     out->pxFastCopy = swr->pxFastCopy;
     out->pxVectorBlend = swr->pxVectorBlend;
+    out->pxScalarBlend = swr->pxScalarBlend;
+    out->pxRotated = swr->pxRotated;
     out->pxWritten = swr->pxWritten;
     out->pxFastCopy = swr->pxFastCopy;
 }

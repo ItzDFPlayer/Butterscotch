@@ -1920,6 +1920,8 @@ int loop(CommandLineArgs args, const char *argv0) {
                         perfFrame.pxWritten = texStats.pxWritten;
                         perfFrame.pxFastCopy = texStats.pxFastCopy;
                         perfFrame.pxVectorBlend = texStats.pxVectorBlend;
+                        perfFrame.pxScalarBlend = texStats.pxScalarBlend;
+                        perfFrame.pxRotated = texStats.pxRotated;
                     }
 #endif
                     if (!perfRoomKnown || perfRoom != perfLastRoom) {

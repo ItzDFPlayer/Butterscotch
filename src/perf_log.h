@@ -35,6 +35,8 @@ typedef struct {
     uint64_t pxWritten;      // destination pixels covered by sprite blits (cumulative)
     uint64_t pxFastCopy;     // of those, how many took the opaque copy path (cumulative)
     uint64_t pxVectorBlend;  // of those, how many took the vectorised blend path (cumulative)
+    uint64_t pxScalarBlend;  // of those, how many fell back to the scalar blend loop
+    uint64_t pxRotated;      // pixels covered by rotated sprites (bounds area)
 } PerfLogFrame;
 
 // Opens `path` for writing. `slowFrameMs` is the threshold (in wall-frame
