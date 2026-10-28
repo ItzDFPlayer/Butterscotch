@@ -71,6 +71,7 @@
 #include "utils.h"
 #include "profiler.h"
 #include "gettime.h"
+#include "perf_log.h"
 
 #ifdef PLATFORM_VITA
 #include "vita_textures.h"
@@ -103,32 +104,49 @@ typedef struct {
 
 static size_t get_used_memory(void) {
 #if defined(__linux__)
-    int fd = open("/proc/self/smaps_rollup", O_RDONLY);
-    if (fd < 0)
-        return 0;
-
-    char buf[512];
-    int n = read(fd, buf, sizeof(buf) - 1);
-    close(fd);
-    if (n <= 0)
-        return 0;
-    buf[n] = '\0';
-
-    char *p = buf;
-    while (*p) {
-        if (strncmp(p, "Anonymous:", 10) == 0) {
-            p += 10;
-            while (*p == ' ' || *p == '\t')
-                p++;
-            size_t kb = 0;
-            while (*p >= '0' && *p <= '9')
-                kb = kb * 10 + (size_t)(*p++ - '0');
-            return kb * 1024;
+    {
+        // Prefer smaps_rollup (private anonymous memory). Some handheld kernels do
+        // not expose it, so fall back to the plain resident set size.
+        int fd = open("/proc/self/smaps_rollup", O_RDONLY);
+        if (fd >= 0) {
+            char buf[512];
+            int n = read(fd, buf, sizeof(buf) - 1);
+            close(fd);
+            if (n > 0) {
+                buf[n] = '\0';
+                char *p = buf;
+                while (*p) {
+                    if (strncmp(p, "Anonymous:", 10) == 0) {
+                        p += 10;
+                        while (*p == ' ' || *p == '\t')
+                            p++;
+                        size_t kb = 0;
+                        while (*p >= '0' && *p <= '9')
+                            kb = kb * 10 + (size_t)(*p++ - '0');
+                        return kb * 1024;
+                    }
+                    while (*p && *p != '\n')
+                        p++;
+                    if (*p)
+                        p++;
+                }
+            }
         }
-        while (*p && *p != '\n')
-            p++;
-        if (*p)
-            p++;
+    }
+    {
+        // /proc/self/statm: fields are "size resident shared ..." in pages.
+        FILE *statm = fopen("/proc/self/statm", "r");
+        if (statm != NULL) {
+            unsigned long totalPages = 0, residentPages = 0;
+            if (fscanf(statm, "%lu %lu", &totalPages, &residentPages) == 2) {
+                fclose(statm);
+                long pageSize = sysconf(_SC_PAGESIZE);
+                if (pageSize <= 0)
+                    pageSize = 4096;
+                return (size_t) residentPages * (size_t) pageSize;
+            }
+            fclose(statm);
+        }
     }
 #elif defined(__APPLE__)
     task_basic_info_data_t info;
@@ -816,6 +834,24 @@ int loop(CommandLineArgs args, const char *argv0) {
     timeBeginPeriod(1);
 #endif
 
+    // Frame-level performance log. Deliberately small (heartbeats, slow frames,
+    // room changes and the GML scripts running during spikes) so it can be
+    // copied off an SD card and attached to a bug report.
+    PerfLog* perfLog = nullptr;
+    if (args.perfLogPath != nullptr && args.perfLogPath[0] != '\0') {
+        perfLog = PerfLog_open(args.perfLogPath, args.perfLogSlowMs);
+        if (perfLog == nullptr) {
+            logWarn("Could not create performance log '%s'\n", args.perfLogPath);
+        } else {
+            logInfo("Writing performance log to '%s' (slow frame >= %d ms)\n",
+                    args.perfLogPath, args.perfLogSlowMs);
+            PerfLog_note(perfLog, "Game: %s", args.dataWinPath);
+            PerfLog_note(perfLog, "Renderer: %s",
+                         args.renderer == SOFTWARE ? "software" :
+                         args.renderer == LEGACY_GL ? "legacy-gl" : "modern-gl");
+        }
+    }
+
     // Decode a room's texture pages right after the room change instead of
     // letting the first draw calls stall on them. Disable with BUTTERSCOTCH_NO_PREFETCH=1.
     bool prefetchTextures = true;
@@ -921,7 +957,8 @@ int loop(CommandLineArgs args, const char *argv0) {
         // Initialize VM
         VMContext* vm = VM_create(dataWin);
 
-        Profiler_setEnabled(&vm->profiler, args.profilerFramesBetween > 0);
+        PerfLog_note(perfLog, "Loading %s", currentDataWinPath);
+        Profiler_setEnabled(&vm->profiler, args.profilerFramesBetween > 0 || perfLog != nullptr);
 #ifdef ENABLE_VM_OPCODE_PROFILER
         vm->opcodeProfilerEnabled = args.opcodeProfiler;
         if (vm->opcodeProfilerEnabled) {
@@ -1387,6 +1424,15 @@ int loop(CommandLineArgs args, const char *argv0) {
         uint64_t lastFrameTime = nowNanos();
         uint64_t lastFrameStartTime = lastFrameTime; // for delta_time
         bool shouldWindowClose = false;
+        // --perf-log state: RSS is sampled occasionally because reading it is not free.
+        uint32_t perfCachedRssBytes = 0;
+        int perfRssTick = 0;
+        int perfFramesSinceReport = 0;
+        bool perfRoomKnown = false;
+        const Room* perfLastRoom = nullptr;
+        // Room-change texture prefetch: decode the incoming room's pages once,
+        // behind the loading bar, instead of stalling inside the first draw calls.
+        const Room* prefetchLastRoom = nullptr;
         while (true) {
             if (runner->shouldExit || shouldWindowClose) {
                 actuallyShuttingDown = true;
@@ -1428,10 +1474,12 @@ int loop(CommandLineArgs args, const char *argv0) {
             }
 
             uint64_t frameStartTime = 0;
+            uint64_t perfAfterStep = 0;
+            uint64_t perfAfterDraw = 0;
 
             if (shouldStep) {
+                frameStartTime = nowNanos();
                 if (args.traceFrames) {
-                    frameStartTime = nowNanos();
                     logInfo("Frame %d (Start)\n", runner->frameCount);
                 }
 
@@ -1567,6 +1615,7 @@ int loop(CommandLineArgs args, const char *argv0) {
             // Run one game step (Begin Step, Keyboard, Alarms, Step, End Step, room transitions)
             if (shouldStep) {
                 Runner_step(runner);
+                perfAfterStep = nowNanos();
             }
 
             if (freeCamActive) {
@@ -1700,6 +1749,7 @@ int loop(CommandLineArgs args, const char *argv0) {
                 Runner_drawPost(runner, fbWidth, fbHeight);
                 renderer->vtable->endFrameEnd(renderer);
                 Runner_drawGUI(runner, fbWidth, fbHeight, gameW, gameH);
+                perfAfterDraw = nowNanos();
 
                 if (showDebugOverlay && renderer->vtable->drawTextUI != nullptr) {
                     renderer->vtable->beginGUI(renderer, fbWidth, fbHeight, 0, 0, fbWidth, fbHeight, RENDER_TARGET_HOST_FRAMEBUFFER);
@@ -1799,6 +1849,65 @@ int loop(CommandLineArgs args, const char *argv0) {
                 platformSwapBuffers();
             if (shouldStep) {
                 Runner_handlePendingRoomChange(runner);
+
+#ifdef ENABLE_SW_RENDERER
+                if (prefetchTextures && !args.headless && gfx == SOFTWARE && renderer != nullptr &&
+                    runner->currentRoom != prefetchLastRoom) {
+                    prefetchLastRoom = runner->currentRoom;
+                    prefetchRoomTextures(runner, renderer, fbWidth, fbHeight);
+                }
+#endif
+
+                if (perfLog != nullptr && perfAfterDraw != 0) {
+                    if (++perfRssTick >= 30) {
+                        perfRssTick = 0;
+                        perfCachedRssBytes = (uint32_t) get_used_memory();
+                    }
+
+                    PerfLogFrame perfFrame = {0};
+                    perfFrame.frame = runner->frameCount;
+                    const Room* perfRoom = runner->currentRoom;
+                    perfFrame.room = perfRoom != nullptr ? perfRoom->name : nullptr;
+                    perfFrame.instanceCount = (int) arrlen(runner->instances);
+                    perfFrame.stepMs = (double) (perfAfterStep - frameStartTime) / 1000000.0;
+                    perfFrame.drawMs = (double) (perfAfterDraw - perfAfterStep) / 1000000.0;
+                    // deltaTime is the wall time since the previous frame start, in microseconds.
+                    perfFrame.frameMs = (double) runner->deltaTime / 1000.0;
+                    perfFrame.audioCacheBytes = (uint32_t) runner->dataWin->audoOwnedBytes;
+                    perfFrame.rssBytes = perfCachedRssBytes;
+#ifdef ENABLE_SW_RENDERER
+                    if (gfx == SOFTWARE) {
+                        SWRendererTextureStats texStats;
+                        SWRenderer_getTextureStats(renderer, &texStats);
+                        perfFrame.textureBytes = texStats.textureBytes;
+                        perfFrame.textureBudgetBytes = texStats.budgetBytes;
+                        perfFrame.textureLoads = texStats.loads;
+                        perfFrame.textureEvictions = texStats.evictions;
+                        perfFrame.drawsAttempted = texStats.drawsAttempted;
+                        perfFrame.drawsCulled = texStats.drawsCulled;
+                    }
+#endif
+                    if (!perfRoomKnown || perfRoom != perfLastRoom) {
+                        perfRoomKnown = true;
+                        perfLastRoom = perfRoom;
+                        PerfLog_roomChange(perfLog, &perfFrame);
+                    }
+                    if (PerfLog_frame(perfLog, &perfFrame)) {
+                        // This frame stuttered; record which GML scripts were running.
+                        if (vm->profiler != nullptr) {
+                            char* perfReport = Profiler_createReport(vm->profiler, 15, perfFramesSinceReport + 1);
+                            if (perfReport != nullptr) {
+                                PerfLog_note(perfLog, "slow frame %d (%.1f ms):", perfFrame.frame, perfFrame.frameMs);
+                                PerfLog_scriptReport(perfLog, perfReport);
+                                free(perfReport);
+                            }
+                            Profiler_reset(vm->profiler);
+                        }
+                        perfFramesSinceReport = 0;
+                    } else {
+                        perfFramesSinceReport++;
+                    }
+                }
             }
 
             if (RunnerKeyboard_checkPressed(runner->keyboard, VK_BACKSPACE)) {
@@ -1857,6 +1966,11 @@ int loop(CommandLineArgs args, const char *argv0) {
         PreProcessedStuff_free();
 
         if (actuallyShuttingDown) {
+            if (perfLog != nullptr) {
+                PerfLog_summary(perfLog);
+                PerfLog_close(perfLog);
+                perfLog = nullptr;
+            }
             free(currentDataWinPath);
             repeat(arrlen(currentGameArgs), i) {
                 free(currentGameArgs[i]);

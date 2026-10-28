@@ -29,4 +29,14 @@ void vLogError(const char* fmt, va_list va);
 void logDebug(const char* fmt, ...);
 void vLogDebug(const char* fmt, va_list va);
 
+// ===[ File mirror ]===
+// Mirrors every log line into a plain-text file so a session running on a
+// handheld (where stdout goes nowhere) can be copied off the SD card and
+// shared. Each physical line gets an elapsed-seconds prefix so it can be lined
+// up with --perf-log output. Returns false when the file could not be opened.
+bool logSetFile(const char* path);
+void logCloseFile(void);
+bool logIsFileOpen(void);
+const char* logGetFilePath(void);
+
 #endif /* _BS_LOG_H */
