@@ -87,12 +87,6 @@ FORCE_INLINE swrVec8 swrMinVec(swrVec8 a, swrVec8 b)
     return (a & lower) | (b & ~lower);
 }
 
-FORCE_INLINE swrVec8 swrMaxVec(swrVec8 a, swrVec8 b)
-{
-    swrVec8 higher = (a > b);
-    return (a & higher) | (b & ~higher);
-}
-
 // 0 = normal, 1 = additive (clamped per channel), 2 = subtract.
 #define SWR_FILL_NORMAL   0
 #define SWR_FILL_ADD      1
