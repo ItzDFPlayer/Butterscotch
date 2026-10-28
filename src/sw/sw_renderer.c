@@ -1246,6 +1246,33 @@ static bool SWRenderer_surfaceGetPixels(Renderer* renderer, int32_t surfaceID, u
     return false;
 }
 
+// Overwrites a surface with a fully opaque RGB555 frame. Video playback is the only
+// caller: a decoded frame has to become something the game can draw_surface().
+static bool SWRenderer_surfaceUploadRgb555(Renderer* renderer, int32_t surfaceID, const uint16_t* pixels,
+                                           int32_t width, int32_t height, int32_t pitch)
+{
+    SWRenderer* swr = (SWRenderer*) renderer;
+    if (surfaceID < 0 || (size_t) surfaceID >= swr->surfaceCount || swr->surfaces[surfaceID] == NULL)
+        return false;
+
+    SWSurface* surf = swr->surfaces[surfaceID];
+    swrCommitShadowWritesToSurfaceIfNeeded(swr, surf);
+
+    SWTexture* tex = surf->texture;
+    int32_t w = swrMin(width, (int32_t) tex->width);
+    int32_t h = swrMin(height, (int32_t) tex->height);
+
+    for (int32_t y = 0; y < h; y++)
+    {
+        const uint16_t* src = pixels + (size_t) y * (size_t) pitch;
+        uintpixel_t* dst = &tex->buffer[(size_t) y * tex->width];
+        for (int32_t x = 0; x < w; x++)
+            dst[x] = (uintpixel_t) (src[x] | 0x8000);
+    }
+
+    return true;
+}
+
 static int32_t SWRenderer_gpuGetBlendMode(Renderer* renderer)
 {
     SWRenderer* swr = (SWRenderer*) renderer;
@@ -1616,6 +1643,7 @@ Renderer* SWRenderer_create(void)
     swrVtable.surfaceFree              = SWRenderer_surfaceFree;
     swrVtable.surfaceCopy              = SWRenderer_surfaceCopy;
     swrVtable.surfaceGetPixels         = SWRenderer_surfaceGetPixels;
+    swrVtable.surfaceUploadRgb555      = SWRenderer_surfaceUploadRgb555;
     swrVtable.drawTiledPart            = SWRenderer_drawTiledPart;
     swrVtable.spriteGetTexture         = SWRenderer_spriteGetTexture;
     swrVtable.surfaceGetTexture        = SWRenderer_surfaceGetTexture;

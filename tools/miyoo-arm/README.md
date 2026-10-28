@@ -24,8 +24,22 @@ which is why it is used here.
 
 ```sh
 tools/miyoo-arm/fetch-zig.sh     # ~55 MB download, 400 MB unpacked, into .zig/
+tools/ffmpeg/build-arm.sh        # one-off: static H.264/AAC ffmpeg, see below
 tools/miyoo-arm/build.sh         # -> build-arm-zig/butterscotch
 ```
+
+## Video playback (optional but recommended)
+
+Deltarune Chapter 3 and 5 open `vid/*.mp4` cutscenes through GameMaker's
+`video_*` API. Decoding those needs ffmpeg, so `tools/ffmpeg/build-arm.sh`
+builds a minimal static copy (mov demuxer, H.264 + AAC decoders, swscale) with
+the same zig toolchain and installs it into `tools/ffmpeg/arm/`. Neither the
+sources nor the build output are committed; the script re-downloads them.
+
+`build.sh` points pkg-config only at that prefix, so a host ffmpeg can never be
+picked up by accident. If the directory is missing, the binary is built without
+video support: the `video_*` built-ins then report "no video", which makes the
+game take its own fallback path instead of hanging on a black screen.
 
 `ZIG=/path/to/zig` overrides the compiler if you keep Zig elsewhere
 (`fetch-zig.sh` only handles x86_64 Linux hosts).

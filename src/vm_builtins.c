@@ -9,6 +9,7 @@
 #include "real_type.h"
 #include "renderer.h"
 #include "runner.h"
+#include "video/video_player.h"
 #include "runner_gamepad.h"
 #include "matrix_math.h"
 #include "utils.h"
@@ -13015,6 +13016,77 @@ static RValue builtin_merge_color(MAYBE_UNUSED VMContext* ctx, RValue* args, MAY
     return RValue_makeReal((GMLReal) Color_lerp(col1, col2, amount));
 }
 
+// ===[ video_* (Deltarune Chapter 3/5 cutscenes) ]===
+//
+// GameMaker's video API is global, so these all act on the runner's single player.
+// The status codes match what the game expects: 0 means "a frame is ready", and
+// anything else means "nothing to draw" (paused, finished, or no video at all -
+// which is also what makes the game take its own fallback path when we cannot
+// decode the file).
+
+static RValue builtin_video_open(VMContext* ctx, RValue* args, MAYBE_UNUSED int32_t argCount) {
+    char* path = RValue_toString(args[0]);
+    bool ok = false;
+    if (path != nullptr) {
+        ok = Runner_videoOpen(ctx->runner, path);
+        free(path);
+    }
+    return RValue_makeReal(ok ? 0.0 : -1.0);
+}
+
+static RValue builtin_video_close(VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) {
+    Runner_videoClose(ctx->runner);
+    return RValue_makeReal(0.0);
+}
+
+static RValue builtin_video_get_status(VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) {
+    return RValue_makeReal((GMLReal) VideoPlayer_status(Runner_getVideo(ctx->runner)));
+}
+
+static RValue builtin_video_get_format(VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) {
+    return RValue_makeReal((GMLReal) VideoPlayer_format(Runner_getVideo(ctx->runner)));
+}
+
+static RValue builtin_video_get_position(VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) {
+    return RValue_makeReal((GMLReal) VideoPlayer_position(Runner_getVideo(ctx->runner)));
+}
+
+static RValue builtin_video_get_duration(VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) {
+    return RValue_makeReal((GMLReal) VideoPlayer_duration(Runner_getVideo(ctx->runner)));
+}
+
+static RValue builtin_video_set_volume(VMContext* ctx, RValue* args, MAYBE_UNUSED int32_t argCount) {
+    float volume = (float) RValue_toReal(args[0]);
+    VideoPlayer_setVolume(Runner_getVideo(ctx->runner), volume);
+    return RValue_makeReal(0.0);
+}
+
+static RValue builtin_video_enable_loop(VMContext* ctx, RValue* args, MAYBE_UNUSED int32_t argCount) {
+    VideoPlayer_setLoop(Runner_getVideo(ctx->runner), RValue_toBool(args[0]));
+    return RValue_makeReal(0.0);
+}
+
+static RValue builtin_video_pause(VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) {
+    VideoPlayer_pause(Runner_getVideo(ctx->runner));
+    return RValue_makeReal(0.0);
+}
+
+static RValue builtin_video_resume(VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) {
+    VideoPlayer_resume(Runner_getVideo(ctx->runner));
+    return RValue_makeReal(0.0);
+}
+
+// video_draw() returns [status, frame surface, chroma surface]; the game blits the
+// frame surface itself so it can put its own shader/tint on top.
+static RValue builtin_video_draw(VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) {
+    Runner* runner = ctx->runner;
+    GMLArray* out = GMLArray_create(ctx->dataWin->gen8.wadVersion, 3);
+    GMLArray_set(out, 0, RValue_makeReal((GMLReal) VideoPlayer_status(Runner_getVideo(runner))));
+    GMLArray_set(out, 1, RValue_makeReal((GMLReal) Runner_videoSurface(runner)));
+    GMLArray_set(out, 2, RValue_makeReal(-1.0)); // no separate chroma surface: we decode to RGB
+    return RValue_makeArray(out);
+}
+
 static RValue builtin_surface_create(VMContext* ctx, RValue* args, MAYBE_UNUSED int32_t argCount) {
     int32_t width = (int32_t) RValue_toReal(args[0]);
     int32_t height = (int32_t) RValue_toReal(args[1]);
@@ -25190,6 +25262,17 @@ void VMBuiltins_registerAll(VMContext* ctx) {
     VM_registerBuiltin(ctx, "merge_colour", builtin_merge_color);
 
     // Surface
+    VM_registerBuiltin(ctx, "video_open", builtin_video_open);
+    VM_registerBuiltin(ctx, "video_close", builtin_video_close);
+    VM_registerBuiltin(ctx, "video_draw", builtin_video_draw);
+    VM_registerBuiltin(ctx, "video_get_status", builtin_video_get_status);
+    VM_registerBuiltin(ctx, "video_get_format", builtin_video_get_format);
+    VM_registerBuiltin(ctx, "video_get_position", builtin_video_get_position);
+    VM_registerBuiltin(ctx, "video_get_duration", builtin_video_get_duration);
+    VM_registerBuiltin(ctx, "video_set_volume", builtin_video_set_volume);
+    VM_registerBuiltin(ctx, "video_enable_loop", builtin_video_enable_loop);
+    VM_registerBuiltin(ctx, "video_pause", builtin_video_pause);
+    VM_registerBuiltin(ctx, "video_resume", builtin_video_resume);
     VM_registerBuiltin(ctx, "surface_create", builtin_surface_create);
     VM_registerBuiltin(ctx, "surface_free", builtin_surface_free);
     VM_registerBuiltin(ctx, "surface_set_target", builtin_surface_set_target);

@@ -213,6 +213,10 @@ typedef struct {
     // Optional: renderers without surface uploads leave this nullptr.
     bool (*surfaceSetPixels)(Renderer* renderer, int32_t surfaceID, const uint8_t* rgba);
     void (*surfaceUploadPixels)(Renderer* renderer, int32_t surfaceID, int32_t w, int32_t h, const uint8_t* rgba);
+    // Optional: overwrite a whole surface with the given RGB555 pixels (the software
+    // renderer's native format). Only used by video playback, where a decoded frame
+    // has to land in a surface the game can then draw. nullptr = unsupported.
+    bool (*surfaceUploadRgb555)(Renderer* renderer, int32_t surfaceID, const uint16_t* pixels, int32_t width, int32_t height, int32_t pitch);
     // Optional: tile a source sub-rect (in tpag source-page space) across a dest rect, for nine-slice Repeat/BlankRepeat at angle 0.
     // srcX/srcY are post tpag->targetX/Y. nullptr = per-tile drawSpritePart fallback (also used for Mirror and non-zero angle).
     void (*drawTiledPart)(Renderer* renderer, int32_t tpagIndex, int32_t srcX, int32_t srcY, int32_t srcW, int32_t srcH, float dstX, float dstY, float dstW, float dstH, uint32_t color, float alpha);
@@ -350,6 +354,11 @@ static inline int32_t Renderer_createSurface(Renderer* renderer, int32_t width, 
 
 static inline bool Renderer_surfaceExists(Renderer* renderer, int32_t surfaceIndex) {
     return renderer->vtable->surfaceExists(renderer, surfaceIndex);
+}
+
+static inline bool Renderer_surfaceUploadRgb555(Renderer* renderer, int32_t surfaceIndex, const uint16_t* pixels, int32_t width, int32_t height, int32_t pitch) {
+    if (renderer->vtable->surfaceUploadRgb555 == nullptr) return false;
+    return renderer->vtable->surfaceUploadRgb555(renderer, surfaceIndex, pixels, width, height, pitch);
 }
 
 static inline float Renderer_getSurfaceWidth(Renderer* renderer, int32_t surfaceIndex) {

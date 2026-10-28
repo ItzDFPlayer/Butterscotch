@@ -14,3 +14,6 @@ src/android/frontend/local.properties
 
 # Miyoo Mini cross toolchain downloads
 tools/miyoo-arm/.zig/
+tools/ffmpeg/ffmpeg-*/
+tools/ffmpeg/*.tar.xz
+tools/ffmpeg/arm/

@@ -95,6 +95,8 @@
 #define OTHER_ASYNC_SAVE_LOAD 72
 #define OTHER_BROADCAST_MESSAGE 76
 #define OTHER_ASYNC_SYSTEM   75
+// Video playback notifications ("video_start" / "video_end"), read from async_load.
+#define OTHER_VIDEO          70
 
 #define MAX_VIEWS 8
 #define MAX_SURFACES 16
@@ -677,6 +679,13 @@ struct Runner {
     Renderer* renderer;
     FileSystem* fileSystem;
     AudioSystem* audioSystem;
+    // The single open video (GameMaker's video_* API is global). NULL when nothing
+    // is playing. Owned by the runner.
+    struct VideoPlayer* video;
+    // Surface the current video frame is uploaded into, -1 when none.
+    int32_t videoSurface;
+    // Set when a video starts or ends, so the async event fires exactly once.
+    int32_t videoPendingEvent;
     Room* currentRoom;
     struct PhysicsEngine* physics;
     struct PhysicsResources* physicsResources; // shared fixture/joint handles; allocated lazily
@@ -925,6 +934,19 @@ bool Runner_isPaused(Runner* runner);
 void Runner_initFirstRoom(Runner* runner);
 void Runner_step(Runner* runner);
 void Runner_handlePendingRoomChange(Runner* runner);
+// ===[ Video ]===
+// The GameMaker video_* API is global, so at most one video is open at a time.
+struct VideoPlayer;
+// Opens a video asset (path relative to data.win). Returns false when this build
+// cannot decode video or the file is unusable.
+bool Runner_videoOpen(Runner* runner, const char* path);
+void Runner_videoClose(Runner* runner);
+// Advances playback, refreshes the frame surface and delivers the async
+// "video_start"/"video_end" events. Called once per frame.
+void Runner_videoUpdate(Runner* runner, float deltaSeconds);
+// Surface holding the current frame, or -1 (no video, paused or finished).
+int32_t Runner_videoSurface(Runner* runner);
+struct VideoPlayer* Runner_getVideo(Runner* runner);
 void Runner_executeEvent(Runner* runner, Instance* instance, int32_t eventType, int32_t eventSubtype);
 void Runner_executeEventFromObject(Runner* runner, Instance* instance, Instance* other, int32_t startObjectIndex, int32_t eventType, int32_t eventSubtype);
 void Runner_executeEventForAll(Runner* runner, int32_t eventType, int32_t eventSubtype);

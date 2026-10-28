@@ -1671,6 +1671,9 @@ int loop(CommandLineArgs args, const char *argv0) {
                 if (0.0f > dt) dt = 0.0f;
                 if (dt > 0.1f) dt = 0.1f; // cap delta to avoid huge fades on lag spikes
                 runner->audioSystem->vtable->update(runner->audioSystem, dt);
+
+                // Advance video playback (Deltarune opens .mp4 cutscenes with video_*)
+                Runner_videoUpdate(runner, dt);
             }
 
             // Dump full runner state if this frame was requested

@@ -19,6 +19,7 @@
 
 #include "debug_overlay.h"
 #include "gettime.h"
+#include "video/video_player.h"
 #include "stb_ds.h"
 
 #include <errno.h>
@@ -4095,6 +4096,147 @@ static void persistRoomState(Runner* runner, int32_t roomIndex) {
     runner->runtimeLayers = nullptr;
 
     state->initialized = true;
+}
+
+// ===[ Video playback ]===
+//
+// Deltarune Chapter 3 and 5 open an .mp4 with video_open() and blit the decoded
+// frames through a surface, then continue their cutscene when GameMaker reports
+// "video_end". Everything below is the runner side of that: resolving the path next
+// to data.win, keeping one surface in sync with the decoder, and delivering the
+// async notifications the game listens for.
+
+// Resolves a game-relative asset path (as passed to video_open) against the folder
+// that holds data.win.
+static bool runnerResolveAssetPath(Runner* runner, const char* relative, char* out, size_t outLen)
+{
+    const char* source = runner->dataWin->sourcePath;
+    if (source == nullptr || source[0] == '\0')
+        return false;
+
+    const char* lastSlash = strrchr(source, '/');
+#if defined(_WIN32)
+    const char* lastBackslash = strrchr(source, '\\');
+    if (lastBackslash != nullptr && (lastSlash == nullptr || lastBackslash > lastSlash))
+        lastSlash = lastBackslash;
+#endif
+    if (lastSlash == nullptr) {
+        snprintf(out, outLen, "%s", relative);
+        return true;
+    }
+
+    int dirLen = (int) (lastSlash - source) + 1;
+    snprintf(out, outLen, "%.*s%s", dirLen, source, relative);
+    return true;
+}
+
+// Posts one async event with a single "type" entry, the way GameMaker delivers its
+// video notifications (the game reads async_load[? "type"]).
+static void runnerFireVideoEvent(Runner* runner, const char* type)
+{
+    DsMapEntry* map = nullptr;
+    arrput(runner->dsMapPool, map);
+    int32_t mapId = (int32_t) arrlen(runner->dsMapPool) - 1;
+
+    DsMapEntry** mapPtr = &runner->dsMapPool[mapId];
+    shput(*mapPtr, safeStrdup("type"), RValue_makeOwnedString(safeStrdup(type)));
+
+    runner->asyncLoadMapId = mapId;
+    Runner_executeEventForAll(runner, EVENT_OTHER, OTHER_VIDEO);
+
+    mapPtr = &runner->dsMapPool[mapId];
+    if (*mapPtr != nullptr) {
+        repeat(shlen(*mapPtr), j) {
+            free((*mapPtr)[j].key);
+            RValue_free(&(*mapPtr)[j].value);
+        }
+        shfree(*mapPtr);
+        *mapPtr = nullptr;
+    }
+    runner->asyncLoadMapId = -1;
+}
+
+void Runner_videoClose(Runner* runner)
+{
+    if (runner->video != nullptr) {
+        VideoPlayer_close(runner->video);
+        runner->video = nullptr;
+    }
+    if (runner->videoSurface >= 0) {
+        if (runner->renderer != nullptr && Renderer_surfaceExists(runner->renderer, runner->videoSurface)
+            && runner->renderer->vtable->surfaceFree != nullptr)
+            runner->renderer->vtable->surfaceFree(runner->renderer, runner->videoSurface);
+        runner->videoSurface = -1;
+    }
+}
+
+bool Runner_videoOpen(Runner* runner, const char* path)
+{
+    Runner_videoClose(runner);
+
+    if (!VideoPlayer_isSupported() || runner->renderer == nullptr)
+        return false;
+
+    char resolved[1024];
+    if (!runnerResolveAssetPath(runner, path, resolved, sizeof(resolved)))
+        return false;
+
+    VideoPlayer* video = VideoPlayer_open(resolved);
+    if (video == nullptr)
+        return false;
+
+    int32_t surface = Renderer_createSurface(runner->renderer, VideoPlayer_width(video), VideoPlayer_height(video));
+    if (surface < 0) {
+        VideoPlayer_close(video);
+        return false;
+    }
+
+    runner->video = video;
+    runner->videoSurface = surface;
+    VideoPlayer_uploadFrame(video, runner->renderer, surface);
+
+    // GameMaker reports the start asynchronously, and the game uses that event to
+    // begin drawing the video at all.
+    runner->videoPendingEvent = 1;
+    return true;
+}
+
+// Returns the surface holding the current video frame, or -1 when there is none.
+int32_t Runner_videoSurface(Runner* runner)
+{
+    if (runner->video == nullptr)
+        return -1;
+    if (VideoPlayer_status(runner->video) != 0)
+        return -1;
+    return runner->videoSurface;
+}
+
+VideoPlayer* Runner_getVideo(Runner* runner)
+{
+    return runner->video;
+}
+
+void Runner_videoUpdate(Runner* runner, float deltaSeconds)
+{
+    if (runner->video != nullptr)
+    {
+        bool ended = VideoPlayer_update(runner->video, deltaSeconds);
+
+        if (runner->videoSurface >= 0 && runner->renderer != nullptr)
+            VideoPlayer_uploadFrame(runner->video, runner->renderer, runner->videoSurface);
+
+        if (ended)
+            runner->videoPendingEvent = 2;
+
+    }
+
+    if (runner->videoPendingEvent == 1) {
+        runner->videoPendingEvent = 0;
+        runnerFireVideoEvent(runner, "video_start");
+    } else if (runner->videoPendingEvent == 2) {
+        runner->videoPendingEvent = 0;
+        runnerFireVideoEvent(runner, "video_end");
+    }
 }
 
 void Runner_handlePendingRoomChange(Runner* runner) {
