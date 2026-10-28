@@ -56,6 +56,27 @@ bool TextureBaker_isComplete(const char* dataWinPath) {
 
 // ===[ Sidecar writer ]===
 
+// Pages that are still 16 MB of RGBA while being converted must fit in RAM next to
+// the baker's own buffers, so very large pages are left to the runtime decoder.
+#define BAKE_MAX_RGBA_BYTES (24u * 1024u * 1024u)
+
+// True when this TXTR blob can be turned into a QOI page blob. BZip2-QOI and plain
+// QOI pass through directly; PNG (used by pre-2022 GameMaker, e.g. Undertale) is
+// decoded and re-encoded, which is what gives those games a strip-backed sidecar
+// instead of a PNG inflate on every page load.
+static bool bakeableBlob(const uint8_t* blob, size_t blobSize, bool gm2022_5) {
+    if (blob == nullptr || blobSize < 4) return false;
+
+    bool qoi = (blob[0] == '2' && blob[1] == 'z' && blob[2] == 'o' && blob[3] == 'q') ||
+               (blob[0] == 'f' && blob[1] == 'i' && blob[2] == 'o' && blob[3] == 'q');
+    if (qoi) return true;
+
+    int width = 0, height = 0;
+    if (!ImageDecoder_probeDimensions(blob, blobSize, gm2022_5, &width, &height)) return false;
+    if (width <= 0 || height <= 0) return false;
+    return (size_t) width * (size_t) height * 4u <= BAKE_MAX_RGBA_BYTES;
+}
+
 typedef struct {
     FILE* file;
     BakedTextureEntry* entries;
@@ -273,9 +294,7 @@ int TextureBaker_bake(const char* dataWinPath, const char* outputPath,
         }
 
         const uint8_t* blob = texture->blobData;
-        bool bakeable =
-            (blob[0] == '2' && blob[1] == 'z' && blob[2] == 'o' && blob[3] == 'q') ||
-            (blob[0] == 'f' && blob[1] == 'i' && blob[2] == 'o' && blob[3] == 'q');
+        bool bakeable = bakeableBlob(blob, (size_t) texture->blobSize, gm2022_5);
 
         if (bakeable) {
             BakedTextureEntry* entry = &sidecar.entries[i];
@@ -325,21 +344,36 @@ int TextureBaker_bake(const char* dataWinPath, const char* outputPath,
         const uint8_t* blob = texture->blobData;
         size_t blobSize = (size_t) texture->blobSize;
         uint8_t* ownedQoi = nullptr;
+        uint8_t* ownedRgba = nullptr;
         size_t qoiSize = 0;
 
         if (blob[0] == 'f' && blob[1] == 'i' && blob[2] == 'o' && blob[3] == 'q') {
             qoiSize = blobSize;
         } else {
             ownedQoi = ImageDecoder_extractQoi(blob, blobSize, gm2022_5, &qoiSize);
+        }
+
+        if (ownedQoi == nullptr && qoiSize == 0) {
+            // Not QOI or BZip2-QOI: decode (PNG) and re-encode so the page still gets
+            // a strip-table entry. Skipped pages only cost what they cost today.
+            int width = 0, height = 0;
+            ownedRgba = ImageDecoder_decodeToRgba(blob, blobSize, gm2022_5, &width, &height);
+            if (ownedRgba != nullptr) {
+                ownedQoi = ImageDecoder_encodeQoi(ownedRgba, width, height, &qoiSize);
+                free(ownedRgba);
+                ownedRgba = nullptr;
+            }
             if (ownedQoi == nullptr) {
-                free(ownedQoi);
+                logWarn("TextureBaker: page %u could not be converted; it will be decoded at runtime\n", i);
                 if (loadedHere && !texture->mapped) {
                     free(texture->blobData);
                     texture->blobData = nullptr;
                 }
-                ok = false;
-                break;
+                continue;
             }
+        }
+
+        if (ownedQoi != nullptr) {
             blob = ownedQoi;
         }
 
@@ -351,6 +385,7 @@ int TextureBaker_bake(const char* dataWinPath, const char* outputPath,
         }
 
         free(ownedQoi);
+        free(ownedRgba);
         if (loadedHere && !texture->mapped) {
             free(texture->blobData);
             texture->blobData = nullptr;

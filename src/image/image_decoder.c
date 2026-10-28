@@ -396,6 +396,123 @@ uint8_t* ImageDecoder_extractQoi(const uint8_t* blob, size_t blobSize, bool gm20
     if (outSize) *outSize = (size_t) destLen;
     return uncompressed;
 }
+
+// ===[ QOI encoder ]===
+//
+// Writes the same "fioq" layout the streaming decoder above reads:
+//   bytes 0..3  = "fioq"
+//   bytes 4..5  = width  (LE uint16)
+//   bytes 6..7  = height (LE uint16)
+//   bytes 8..11 = length of the pixel data that follows (LE uint32)
+//
+// Only the opcodes the decoder implements are emitted (index, run, 8-bit diff,
+// 16-bit diff and literal colour), and the index hash matches the decoder's
+// ((r ^ g ^ b ^ a) & 63) rather than the reference QOI hash, so the output can be
+// fed straight back into it.
+
+static void qoiEmitRun(uint8_t* out, size_t* pos, uint32_t run) {
+    while (run > 0) {
+        if (run <= 32) {
+            out[(*pos)++] = (uint8_t) (0x40u | (run - 1u));
+            return;
+        }
+        uint32_t chunk = run > 8224u ? 8224u : run;
+        uint32_t value = chunk - 33u;
+        out[(*pos)++] = (uint8_t) (0x60u | ((value >> 8) & 0x1Fu));
+        out[(*pos)++] = (uint8_t) (value & 0xFFu);
+        run -= chunk;
+    }
+}
+
+uint8_t* ImageDecoder_encodeQoi(const uint8_t* rgba, int width, int height, size_t* outSize) {
+    if (rgba == nullptr || width <= 0 || height <= 0) return nullptr;
+    if (width > 16384 || height > 16384) return nullptr;
+
+    size_t pixels = (size_t) width * (size_t) height;
+    // Worst case is one literal colour per pixel: 5 bytes each, plus the header.
+    size_t capacity = QOI_HEADER_SIZE + pixels * 5u + 16u;
+    uint8_t* out = (uint8_t*) malloc(capacity);
+    if (out == nullptr) return nullptr;
+
+    out[0] = 'f';
+    out[1] = 'i';
+    out[2] = 'o';
+    out[3] = 'q';
+    out[4] = (uint8_t) (width & 0xFF);
+    out[5] = (uint8_t) ((width >> 8) & 0xFF);
+    out[6] = (uint8_t) (height & 0xFF);
+    out[7] = (uint8_t) ((height >> 8) & 0xFF);
+
+    uint8_t index[64 * 4];
+    memset(index, 0, sizeof(index));
+
+    uint8_t prevR = 0, prevG = 0, prevB = 0, prevA = 255;
+    uint32_t run = 0;
+    size_t pos = QOI_HEADER_SIZE;
+
+    for (size_t i = 0; i < pixels; i++) {
+        uint8_t r = rgba[i * 4 + 0];
+        uint8_t g = rgba[i * 4 + 1];
+        uint8_t b = rgba[i * 4 + 2];
+        uint8_t a = rgba[i * 4 + 3];
+
+        if (r == prevR && g == prevG && b == prevB && a == prevA) {
+            run++;
+            continue;
+        }
+        if (run > 0) {
+            qoiEmitRun(out, &pos, run);
+            run = 0;
+        }
+
+        size_t hash = (size_t) ((r ^ g ^ b ^ a) & 63) * 4;
+        if (index[hash] == r && index[hash + 1] == g && index[hash + 2] == b && index[hash + 3] == a) {
+            out[pos++] = (uint8_t) (hash >> 2);
+        } else {
+            index[hash] = r;
+            index[hash + 1] = g;
+            index[hash + 2] = b;
+            index[hash + 3] = a;
+
+            int dr = (int) r - (int) prevR;
+            int dg = (int) g - (int) prevG;
+            int db = (int) b - (int) prevB;
+            int da = (int) a - (int) prevA;
+
+            if (da == 0 && dr > -3 && dr < 2 && dg > -3 && dg < 2 && db > -3 && db < 2) {
+                out[pos++] = (uint8_t) (0x80 | ((dr & 3) << 4) | ((dg & 3) << 2) | (db & 3));
+            } else if (da == 0 && dr > -17 && dr < 16 && dg > -9 && dg < 8 && db > -9 && db < 8) {
+                // dr is a 5-bit field, dg and db are 4-bit fields on the wire.
+                out[pos++] = (uint8_t) (0xC0 | (dr & 0x1F));
+                out[pos++] = (uint8_t) (((dg & 0x0F) << 4) | (db & 0x0F));
+            } else {
+                size_t opcodeAt = pos++;
+                uint8_t flags = 0;
+                if (dr != 0) { flags |= 8; out[pos++] = r; }
+                if (dg != 0) { flags |= 4; out[pos++] = g; }
+                if (db != 0) { flags |= 2; out[pos++] = b; }
+                if (da != 0) { flags |= 1; out[pos++] = a; }
+                out[opcodeAt] = (uint8_t) (0xF0 | flags);
+            }
+        }
+
+        prevR = r;
+        prevG = g;
+        prevB = b;
+        prevA = a;
+    }
+
+    if (run > 0) qoiEmitRun(out, &pos, run);
+
+    uint32_t pixelBytes = (uint32_t) (pos - QOI_HEADER_SIZE);
+    out[8] = (uint8_t) (pixelBytes & 0xFF);
+    out[9] = (uint8_t) ((pixelBytes >> 8) & 0xFF);
+    out[10] = (uint8_t) ((pixelBytes >> 16) & 0xFF);
+    out[11] = (uint8_t) ((pixelBytes >> 24) & 0xFF);
+
+    if (outSize) *outSize = pos;
+    return out;
+}
 bool ImageDecoder_probeDimensions(const uint8_t* blob, size_t blobSize, bool gm2022_5, int* outW, int* outH) {
     (void) gm2022_5;
     if (!blob || blobSize < 8) return false;

@@ -25,6 +25,12 @@ bool ImageDecoder_probeDimensions(const uint8_t* blob, size_t blobSize, bool gm2
 // BZip2 when needed). Used by the offline texture baker. PNG blobs return nullptr.
 // Caller must free() the result.
 uint8_t* ImageDecoder_extractQoi(const uint8_t* blob, size_t blobSize, bool gm2022_5, size_t* outSize);
+
+// Encodes RGBA8 pixels into the "fioq" stream this project's decoder understands.
+// Only the texture baker uses it: games whose pages GameMaker stored as PNG (older
+// titles such as Undertale) are converted once, so they get strip residency and no
+// PNG inflate at load time. Caller must free() the result.
+uint8_t* ImageDecoder_encodeQoi(const uint8_t* rgba, int width, int height, size_t* outSize);
 // ===[ Sub-page (strip) decoding ]===
 //
 // QOI is a sequential format, so a sub-rectangle of a page cannot be decoded
