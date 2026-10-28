@@ -13,6 +13,9 @@
 #include <windows.h>
 #include <mmsystem.h>
 #include <io.h>
+#include <direct.h>
+#include <psapi.h>
+#define getcwd _getcwd
 #endif
 #ifdef __APPLE__
 #include <mach/mach.h>

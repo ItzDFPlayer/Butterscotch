@@ -127,6 +127,12 @@ typedef struct {
     bool lazyTextures;
     bool lazyAudio;
     DataWinLoadType loadType;
+    // True when the user explicitly passed --load-type / --lazy-rooms, so the
+    // software-renderer low-memory defaults do not override their choice.
+    bool loadTypeExplicit;
+    bool lazyRoomsExplicit;
+    bool lazyTexturesExplicit;
+    bool lazyAudioExplicit;
     int profilerFramesBetween; // 0 = disabled
 #ifdef ENABLE_VM_OPCODE_PROFILER
     bool opcodeProfiler;

@@ -255,9 +255,11 @@ void parseCommandLineArgs(CommandLineArgs* args, int argc, char* argv[]) {
                 break;
             case 'L':
                 args->lazyTextures = true;
+                args->lazyTexturesExplicit = true;
                 break;
             case 'K':
                 args->lazyAudio = true;
+                args->lazyAudioExplicit = true;
                 break;
 #if defined(ENABLE_LEGACY_GL) || defined(ENABLE_MODERN_GL)
             case 'v':
@@ -405,6 +407,7 @@ void parseCommandLineArgs(CommandLineArgs* args, int argc, char* argv[]) {
                 break;
             case 'z':
                 args->lazyRooms = true;
+                args->lazyRoomsExplicit = true;
                 break;
             case 'G':
                 shput(args->eagerRooms, optarg, true);
@@ -482,6 +485,7 @@ void parseCommandLineArgs(CommandLineArgs* args, int argc, char* argv[]) {
                 break;
             }
             case 999: {
+                args->loadTypeExplicit = true;
                 if (strcmp(optarg, "load-in-memory-ahead-of-time") == 0) {
                     args->loadType = DATAWINLOADTYPE_LOAD_IN_MEMORY_AHEAD_OF_TIME;
                 } else if (strcmp(optarg, "map-file") == 0) {

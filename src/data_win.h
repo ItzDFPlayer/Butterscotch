@@ -879,9 +879,11 @@ typedef struct {
 // ===[ AUDO - Embedded Audio ]===
 typedef struct {
     bool present;
+    bool dataOwned;      // true when data is a heap buffer that DataWin_free must release
+    uint32_t entryOffset; // absolute file offset to the AUDO entry header (used when metadata is lazy)
     uint32_t dataOffset; // absolute file offset to audio data
     uint32_t dataSize;   // length of audio data
-    uint8_t* data;       // owned copy of audio data
+    uint8_t* data;       // owned copy of audio data (or a pointer into the mapped WAD)
 } AudioEntry;
 
 typedef struct {

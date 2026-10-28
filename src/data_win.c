@@ -2743,6 +2743,14 @@ void DataWin_loadTxtrIfNeeded(DataWin* dw, uint32_t textureId) {
     if (tex->blobOffset == 0 || tex->blobSize == 0) return;
     if (tex->blobData != nullptr) return;
 
+    if (dw->mappedFile) {
+        // Zero-copy: decode straight from the read-only mapping. The pages stay
+        // file-backed and reclaimable under memory pressure.
+        tex->blobData = dw->mappedFile + tex->blobOffset;
+        tex->mapped = true;
+        return;
+    }
+
     if (!dw->lazyLoadFile) {
         logWarn("loadTxtrIfNeeded: called without a lazy load file.\n");
         return;
@@ -2773,18 +2781,28 @@ static void parseAUDO(BinaryReader* reader, DataWin* dw, bool loadAudioDataLazil
     a->entries = (AudioEntry *)safeCalloc(count, sizeof(AudioEntry));
     repeat(count, i) {
         if (ptrs[i] == 0) continue;
+
+        if (loadAudioDataLazily) {
+            // Walking every entry header here touches pages scattered across the whole
+            // (potentially 100+ MB) AUDO chunk. Record the entry pointer instead and
+            // resolve size/offset on first use.
+            a->entries[i].present = true;
+            a->entries[i].entryOffset = ptrs[i];
+            continue;
+        }
+
         BinaryReader_seek(reader, ptrs[i]);
         a->entries[i].present = true;
+        a->entries[i].entryOffset = ptrs[i];
         a->entries[i].dataSize = BinaryReader_readUint32(reader);
         a->entries[i].dataOffset = (uint32_t)BinaryReader_getPosition(reader);
         // Load audio data into owned buffer
-        if (loadAudioDataLazily) {
-            a->entries[i].data = nullptr;
-        } else if (dw->mappedFile) {
+        if (dw->mappedFile) {
             a->entries[i].data = dw->mappedFile + a->entries[i].dataOffset;
         } else if (a->entries[i].dataSize > 0) {
             a->entries[i].data = (uint8_t *)safeMalloc(a->entries[i].dataSize);
             BinaryReader_readBytes(reader, a->entries[i].data, a->entries[i].dataSize);
+            a->entries[i].dataOwned = true;
         } else {
             a->entries[i].data = nullptr;
         }
@@ -2805,6 +2823,7 @@ void DataWin_loadAudoIfNeeded(DataWin* dw, uint32_t audioEntryId) {
     }
 
     entry->data = (uint8_t *)safeMalloc(entry->dataSize);
+    entry->dataOwned = true;
 
     memset(entry->data, 0, entry->dataSize);
     long old_seek = ftell(dw->lazyLoadFile);
@@ -2858,12 +2877,17 @@ DataWin* DataWin_parse(const char* filePath, DataWinParserOptions options) {
     } else if (options.loadType == DATAWINLOADTYPE_MAP_FILE) {
         wholeFileData = mapFile(file, fileSize);
         if (!wholeFileData) {
-            logError("Failed to map file\n");
-            fclose(file);
-            exit(1);
+            // mmap can fail on unusual filesystems; fall back to the lowest-memory
+            // streaming mode instead of aborting.
+            logWarn("Failed to map %s; falling back to per-chunk loading with lazy assets.\n", filePath);
+            options.loadType = DATAWINLOADTYPE_LOAD_PER_CHUNK;
+            options.lazyLoadRooms = true;
+            options.lazyLoadTextures = true;
+            options.lazyLoadAudio = true;
+        } else {
+            BinaryReader_setBuffer(&reader, wholeFileData, 0, (size_t) fileSize);
+            dw->mappedFile = wholeFileData;
         }
-        BinaryReader_setBuffer(&reader, wholeFileData, 0, (size_t) fileSize);
-        dw->mappedFile = wholeFileData;
     }
 
     // Validate FORM header
@@ -2979,9 +3003,17 @@ DataWin* DataWin_parse(const char* filePath, DataWinParserOptions options) {
             (options.parseAudo && memcmp(chunkName, "AUDO", 4) == 0) ||
             (memcmp(chunkName, "ACRV", 4) == 0);
 
+        // Chunks whose payloads stay on disk (lazy audio/textures/rooms) only have
+        // their headers touched during parsing, so buffering the whole chunk would
+        // waste tens of MB for no benefit.
+        bool parseChunkLazily =
+            (options.parseAudo && options.lazyLoadAudio && memcmp(chunkName, "AUDO", 4) == 0) ||
+            (options.parseTxtr && options.lazyLoadTextures && memcmp(chunkName, "TXTR", 4) == 0) ||
+            (options.parseRoom && options.lazyLoadRooms && memcmp(chunkName, "ROOM", 4) == 0);
+
         // Bulk-read the chunk data into memory for fast parsing
         uint8_t* chunkBuffer = nullptr;
-        if (shouldParse && chunkLength > 0 && options.loadType == DATAWINLOADTYPE_LOAD_PER_CHUNK) {
+        if (shouldParse && chunkLength > 0 && !parseChunkLazily && options.loadType == DATAWINLOADTYPE_LOAD_PER_CHUNK) {
             chunkBuffer = (uint8_t *)malloc(chunkLength);
             if (chunkBuffer) {
                 size_t read = fread(chunkBuffer, 1, chunkLength, reader.file);
@@ -3333,8 +3365,8 @@ void DataWin_free(DataWin* dw) {
 
     // AUDO
     if (dw->audo.entries) {
-        if (!dw->mappedFile) {
-            repeat(dw->audo.count, i) {
+        repeat(dw->audo.count, i) {
+            if (dw->audo.entries[i].dataOwned) {
                 free(dw->audo.entries[i].data);
             }
         }
