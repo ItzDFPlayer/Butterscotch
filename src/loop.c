@@ -1919,6 +1919,7 @@ int loop(CommandLineArgs args, const char *argv0) {
                         perfFrame.drawsCulled = texStats.drawsCulled;
                         perfFrame.pxWritten = texStats.pxWritten;
                         perfFrame.pxFastCopy = texStats.pxFastCopy;
+                        perfFrame.pxVectorBlend = texStats.pxVectorBlend;
                     }
 #endif
                     if (!perfRoomKnown || perfRoom != perfLastRoom) {

@@ -285,7 +285,7 @@ static void swrDrawLineInt(Renderer* renderer, int x1, int y1, int x2, int y2, M
 // bound `dst + x` here and emits a spurious -Wstringop-overflow for the memcpy.
 typedef uint32_t swrAliasWord __attribute__((may_alias));
 
-static void swrCopyRunOpaque(uintpixel_t* dst, const uintpixel_t* src, int count)
+FORCE_INLINE void swrCopyRunOpaque(uintpixel_t* dst, const uintpixel_t* src, int count)
 {
 #if PIXEL_SIZE == 16
     int x = 0;
@@ -324,6 +324,112 @@ static void swrCopyRunOpaque(uintpixel_t* dst, const uintpixel_t* src, int count
     }
 #endif
 }
+
+// ==== Vectorised blend ====
+//
+// The dominant cost in a busy scene is alpha blending: Deltarune's Cyber World
+// frames blend ~2 million pixels (7 screens of overdraw), and the scalar path costs
+// ~40 cycles per pixel on a Cortex-A7, which is where the entire frame budget goes.
+//
+// This kernels eight pixels at a time for the most common non-trivial blit:
+// 16bpp, unscaled, unflipped, untinted, normal blend mode. It is written with
+// GCC/Clang vector extensions rather than intrinsics so it compiles to NEON on the
+// handheld *and* to SSE on the host, which is what makes it testable for bit
+// exactness off-device.
+//
+// The math is identical to alphaBlend() for this case: with a normal blend the
+// weights sum to 256, so each channel stays inside its 5-bit range and the scalar
+// clamps never fire.
+#if PIXEL_SIZE == 16 && defined(__GNUC__)
+typedef uint16_t swrVec8 __attribute__((vector_size(16)));
+typedef int16_t swrVec8s __attribute__((vector_size(16)));
+
+FORCE_INLINE swrVec8 swrSplat8(uint16_t value)
+{
+    swrVec8 out = { value, value, value, value, value, value, value, value };
+    return out;
+}
+
+FORCE_INLINE swrVec8 swrBlendVec(swrVec8 src, swrVec8 dst, swrVec8 tintR, swrVec8 tintG, swrVec8 tintB,
+                                 bool applyTint, int srcalpha, int dstalpha)
+{
+    const swrVec8 mask5 = swrSplat8(0x1F);
+    const swrVec8 srcAlpha = swrSplat8((uint16_t) srcalpha);
+    const swrVec8 dstAlpha = swrSplat8((uint16_t) dstalpha);
+    const swrVec8 opaqueBit = swrSplat8(0x8000);
+
+    swrVec8 sr = (src >> 10) & mask5;
+    swrVec8 sg = (src >> 5) & mask5;
+    swrVec8 sb = src & mask5;
+
+    // Same as tint(): a multiply by the tint channel divided by 32. Only applied
+    // when the tint really is non-white, because tint() short-circuits that case.
+    if (applyTint)
+    {
+        sr = (sr * tintR) >> 5;
+        sg = (sg * tintG) >> 5;
+        sb = (sb * tintB) >> 5;
+    }
+
+    swrVec8 dr = (dst >> 10) & mask5;
+    swrVec8 dg = (dst >> 5) & mask5;
+    swrVec8 db = dst & mask5;
+
+    swrVec8 r = (dr * dstAlpha + sr * srcAlpha) >> 8;
+    swrVec8 g = (dg * dstAlpha + sg * srcAlpha) >> 8;
+    swrVec8 b = (db * dstAlpha + sb * srcAlpha) >> 8;
+
+    swrVec8 blended = opaqueBit | (r << 10) | (g << 5) | b;
+
+    // lanes whose source pixel is transparent (bit 15 clear) keep the destination
+    swrVec8 keepMask = (swrVec8) (((swrVec8s) src) >> 15);
+
+    return (blended & keepMask) | (dst & ~keepMask);
+}
+
+// True when the vector kernel produces the same pixels as the scalar path.
+FORCE_INLINE bool swrCanBlendVector(const SWRenderer* swr, int srcalpha, int dstalpha)
+{
+    return swr->blendMode == bm_normal &&
+           srcalpha > 0 && srcalpha <= 256 &&
+           dstalpha == 256 - srcalpha;
+}
+
+// Blends a whole unscaled, unflipped sprite rectangle: one call per draw, so small
+// tiles (8x8 UI pieces, for instance) do not pay a call per row.
+static void swrBlendSpriteVector(SWRenderer* swr, int dx, int dy, int dw, int dh,
+                                 const SWTexture* texture, int sx, int sy,
+                                 uintpixel_t tintColor, int srcalpha, int dstalpha)
+{
+    const bool applyTint = !swrTintIsWhite(tintColor);
+    const swrVec8 tintR = swrSplat8((uint16_t) ((tintColor >> 10) & 0x1F));
+    const swrVec8 tintG = swrSplat8((uint16_t) ((tintColor >> 5) & 0x1F));
+    const swrVec8 tintB = swrSplat8((uint16_t) (tintColor & 0x1F));
+
+    for (int y = 0; y < dh; y++)
+    {
+        const uintpixel_t* srcline = &texture->buffer[(sy + y) * texture->width + sx];
+        uintpixel_t* dstline = &swr->fb[(dy + y) * swr->fbPitch + dx];
+
+        int x = 0;
+        for (; x + 8 <= dw; x += 8)
+        {
+            swrVec8 s, d;
+            memcpy(&s, srcline + x, sizeof(s));
+            memcpy(&d, dstline + x, sizeof(d));
+
+            swrVec8 out = swrBlendVec(s, d, tintR, tintG, tintB, applyTint, srcalpha, dstalpha);
+            memcpy(dstline + x, &out, sizeof(out));
+        }
+        for (; x < dw; x++)
+        {
+            uintpixel_t pixel = srcline[x];
+            if (opaque(pixel))
+                alphaBlend(&dstline[x], tint(tintColor, pixel), srcalpha, dstalpha);
+        }
+    }
+}
+#endif
 
 static void swrDrawSpriteInternal(
     Renderer* renderer, int dx, int dy, int dw, int dh,
@@ -403,7 +509,8 @@ static void swrDrawSpriteInternal(
         // Unscaled, unflipped blit: what tiles, background layers and most UI end
         // up going through. With no tint and full opacity the source pixel simply
         // replaces the destination, so runs can be copied whole (see
-        // swrCopyRunOpaque) instead of going through alphaBlend per pixel.
+        // swrCopyRunOpaque). Otherwise the row goes through the vector kernel when
+        // it is applicable, and the scalar per-pixel path when it is not.
         swr->pxWritten += (uint64_t) dw * (uint64_t) dh;
 
         if (swrTintIsWhite(tintColor) && srcalpha > 253 && invalpha < 3)
@@ -418,6 +525,13 @@ static void swrDrawSpriteInternal(
                 swrCopyRunOpaque(dstline, srcline, dw);
             }
         }
+#if PIXEL_SIZE == 16 && defined(__GNUC__)
+        else if (swrCanBlendVector(swr, srcalpha, invalpha))
+        {
+            swr->pxVectorBlend += (uint64_t) dw * (uint64_t) dh;
+            swrBlendSpriteVector(swr, dx, dy, dw, dh, texture, sx, sy, tintColor, srcalpha, invalpha);
+        }
+#endif
         else
         {
             for (int y = 0; y < dh; y++)

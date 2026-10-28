@@ -103,6 +103,7 @@ typedef struct
     // upper bound), and pxFastCopy counts the part that took the opaque copy path.
     uint64_t pxWritten;
     uint64_t pxFastCopy;
+    uint64_t pxVectorBlend;
     // Recently evicted pages, used to detect thrashing.
     uint32_t recentEvictedPages[8];
     uint64_t recentEvictedTicks[8];

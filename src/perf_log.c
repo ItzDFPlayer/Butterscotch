@@ -41,6 +41,7 @@ struct PerfLog {
     uint64_t beatLastCulled;
     uint64_t beatLastPixels;
     uint64_t beatLastFastPixels;
+    uint64_t beatLastVectorPixels;
     uint32_t lastTextureLoads;
     uint32_t lastTextureEvict;
     uint32_t lastBudgetBytes;
@@ -306,13 +307,16 @@ bool PerfLog_frame(PerfLog* log, const PerfLogFrame* frame) {
             uint64_t px = perfDelta(frame->pxWritten, log->beatLastPixels);
             uint64_t fast = perfDelta(frame->pxFastCopy, log->beatLastFastPixels);
             double frames = (double) log->beatFrames;
-            PerfLog_note(log, "pixels in window %d-%d: %.0fK/frame, %.0f%% opaque fast path (%.0f per draw)",
+            uint64_t vec = perfDelta(frame->pxVectorBlend, log->beatLastVectorPixels);
+            PerfLog_note(log, "pixels in window %d-%d: %.0fK/frame, %.0f%% opaque copy, %.0f%% vector blend (%.0f per draw)",
                          perfWindowStart(log, frame), frame->frame,
                          (double) px / frames / 1024.0,
                          px > 0 ? 100.0 * (double) fast / (double) px : 0.0,
+                         px > 0 ? 100.0 * (double) vec / (double) px : 0.0,
                          attemptedInWindow > 0 ? (double) px / (double) attemptedInWindow : 0.0);
             log->beatLastPixels = frame->pxWritten;
             log->beatLastFastPixels = frame->pxFastCopy;
+            log->beatLastVectorPixels = frame->pxVectorBlend;
         }
         log->beatFrames = 0;
         log->beatSumStep = 0.0;

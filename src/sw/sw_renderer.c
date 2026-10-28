@@ -236,6 +236,9 @@ void SWRenderer_getTextureStats(Renderer* renderer, SWRendererTextureStats* out)
     out->drawsCulled = swr->drawsCulled;
     out->pxWritten = swr->pxWritten;
     out->pxFastCopy = swr->pxFastCopy;
+    out->pxVectorBlend = swr->pxVectorBlend;
+    out->pxWritten = swr->pxWritten;
+    out->pxFastCopy = swr->pxFastCopy;
 }
 
 bool SWRenderer_prefetchTexturePage(Renderer* renderer, int32_t pageId)
