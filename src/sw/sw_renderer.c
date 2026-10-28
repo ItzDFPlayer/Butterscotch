@@ -101,6 +101,16 @@ static void SWRenderer_init(Renderer* renderer, DataWin* dataWin)
     dataWin->tpag.count += swr->surfaceCount;
     
     swr->originalSpriteCount = dataWin->sprt.count;
+
+    // Default GPU state: normal blending, everything written, no alpha test.
+    swr->blendMode = bm_normal;
+    swr->blendEnabled = true;
+    swr->blendSrcFactor = 0;
+    swr->blendDstFactor = 0;
+    swr->alphaTestEnabled = false;
+    swr->alphaTestRef = 0;
+    swr->writeMask = WRITE_MASK_ALL;
+    swrSetupBlendState(swr);
     
     for (size_t i = swr->originalTPagCount; i < dataWin->tpag.count; i++)
     {
@@ -128,6 +138,16 @@ static void SWRenderer_beginFrame(Renderer* renderer, int32_t gameW, int32_t gam
     swr->gameH = gameH;
     swr->drawingToSurface = false;
     swr->blendMode = bm_normal;
+    // GameMaker resets the blend unit at the start of every frame; the mask
+    // scripts depend on that, otherwise their alpha-only writes leak into the
+    // next frame's normal blending.
+    swr->blendEnabled = true;
+    swr->blendSrcFactor = 0;
+    swr->blendDstFactor = 0;
+    swr->alphaTestEnabled = false;
+    swr->alphaTestRef = 0;
+    swr->writeMask = WRITE_MASK_ALL;
+    swrSetupBlendState(swr);
 
     if (swr->width != windowW || swr->height != windowH)
     {
@@ -875,28 +895,33 @@ static void SWRenderer_clearScreen(Renderer* renderer, uint32_t color, float alp
 
 static void SWRenderer_gpuSetBlendMode(Renderer* renderer, int32_t mode)
 {
-    //UNIMP();
-    //(void)renderer; (void)mode;
-    
     SWRenderer* swr = (SWRenderer*) renderer;
     swr->blendMode = mode;
-    
-    //if (mode != bm_normal && mode != bm_add && mode != bm_subtract)
-    {
-        fprintf(stderr, "swr: unsupported blend mode: %d\n", mode);
-    }
+    // gpu_set_blendmode() also cancels a gpu_set_blendmode_ext() pair, which is how
+    // the mask scripts hand control back to normal sprite blending.
+    swr->blendSrcFactor = 0;
+    swr->blendDstFactor = 0;
+    swrSetupBlendState(swr);
 }
 
 static void SWRenderer_gpuSetBlendModeExt(Renderer* renderer, int32_t sfactor, int32_t dfactor, int32_t sfactor_alpha, int32_t dfactor_alpha)
 {
-    UNIMP();
-    (void)renderer; (void)sfactor; (void)dfactor; (void)sfactor_alpha; (void)dfactor_alpha;
+    SWRenderer* swr = (SWRenderer*) renderer;
+    // Only the RGB factors are used; GameMaker's _ext form sets the alpha factors to
+    // the same values, and the sel form (which we get through _ext here) is not used
+    // by anything we run.
+    (void) sfactor_alpha;
+    (void) dfactor_alpha;
+    swr->blendSrcFactor = sfactor;
+    swr->blendDstFactor = dfactor;
+    swrSetupBlendState(swr);
 }
 
 static void SWRenderer_gpuSetBlendEnable(Renderer* renderer, bool enable)
 {
-    UNIMP();
-    (void)renderer; (void)enable;
+    SWRenderer* swr = (SWRenderer*) renderer;
+    swr->blendEnabled = enable;
+    swrSetupBlendState(swr);
 }
 
 // Every sprite and surface blit in this renderer samples the texture directly, so
@@ -909,34 +934,36 @@ static void SWRenderer_gpuSetTexFilter(Renderer* renderer, bool enable)
 
 static void SWRenderer_gpuSetAlphaTestEnable(Renderer* renderer, bool enable)
 {
-    UNIMP();
-    (void)renderer; (void)enable;
+    SWRenderer* swr = (SWRenderer*) renderer;
+    swr->alphaTestEnabled = enable;
 }
 
 static void SWRenderer_gpuSetAlphaTestRef(Renderer* renderer, uint8_t ref)
 {
-    UNIMP();
-    (void)renderer; (void)ref;
+    SWRenderer* swr = (SWRenderer*) renderer;
+    swr->alphaTestRef = ref;
 }
 
 static void SWRenderer_gpuSetColorWriteEnable(Renderer* renderer, bool red, bool green, bool blue, bool alpha)
 {
     SWRenderer* swr = (SWRenderer*) renderer;
-    
+
+    swr->writeMask =
+        (red ? WRITE_MASK_RED : 0) |
+        (green ? WRITE_MASK_GREEN : 0) |
+        (blue ? WRITE_MASK_BLUE : 0) |
+        (alpha ? WRITE_MASK_ALPHA : 0);
+    // The mask alone puts us on the general blitter; see swrSetupBlendState.
+    swrSetupBlendState(swr);
+
     if (!swr->drawingToSurface) {
-        fprintf(stderr, "swr: gpuSetColorWriteEnable not supported for main framebuffer");
+        // Nothing else to do: the draw routines apply the mask per pixel.
         return;
     }
     
     SWSurface* currSurf = swr->surfaces[swr->currentSurfaceIndex];
     
     swrCommitShadowWritesToSurfaceIfNeeded(swr, currSurf);
-    
-    swr->writeMask =
-        (red ? WRITE_MASK_RED : 0) |
-        (green ? WRITE_MASK_GREEN : 0) |
-        (blue ? WRITE_MASK_BLUE : 0) |
-        (alpha ? WRITE_MASK_ALPHA : 0);
     
     // no need to change other properties, because the width and height are the same.
     // but we ALWAYS need to re-fetch the writable surface texture since the old one
@@ -952,17 +979,7 @@ static void SWRenderer_gpuSetColorWriteEnable(Renderer* renderer, bool red, bool
 
 static void SWRenderer_gpuGetColorWriteEnable(Renderer* renderer, bool* red, bool* green, bool* blue, bool* alpha)
 {
-    *red = false;
-    *green = false;
-    *blue = false;
-    *alpha = false;
-    
     SWRenderer* swr = (SWRenderer*) renderer;
-    
-    if (!swr->drawingToSurface) {
-        fprintf(stderr, "swr: gpuGetColorWriteEnable not supported for main framebuffer");
-        return;
-    }
     
     *red = (swr->writeMask & WRITE_MASK_RED) != 0;
     *green = (swr->writeMask & WRITE_MASK_GREEN) != 0;

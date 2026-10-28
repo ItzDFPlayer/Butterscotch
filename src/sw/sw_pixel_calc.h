@@ -141,8 +141,19 @@ FORCE_INLINE void alphaBlend(uintpixel_t* dcolor, uintpixel_t scolor, int srcalp
     dcr |= ((signed char)(dcr >> 1) >> 7);
     dcg |= ((signed char)(dcg >> 1) >> 7);
     dcb |= ((signed char)(dcb >> 1) >> 7);
-    
-    *dcolor = 0x8000 | dcb | (dcg << 5) | (dcr << 10);
+
+    // The result alpha. bm_subtract is the only mode that arrives here with a
+    // negative source weight (swrCalcSrcAlpha negates the alpha for it), and it is
+    // how the spotlight/iris effects cut their hole: a partially transparent black
+    // veil is painted first, then the same draw alpha is subtracted back out of the
+    // destination alpha, leaving it at zero inside the circle. Five bits of colour
+    // and one bit of alpha cannot represent "0.4 - 0.4", so any subtract is treated
+    // as removing the destination alpha outright. Without this the hole never opens
+    // and the overlay stays solid black.
+    uintpixel_t alphaBits = 0x8000;
+    if (UNLIKELY(srcalpha < 0)) alphaBits = 0;
+
+    *dcolor = alphaBits | dcb | (dcg << 5) | (dcr << 10);
 #else
     if (srcalpha < 240) {
         static int alphaApproximationThingy = 0;
@@ -156,6 +167,174 @@ FORCE_INLINE void alphaBlend(uintpixel_t* dcolor, uintpixel_t scolor, int srcalp
     }
     
     *dcolor = scolor;
+#endif
+}
+
+// ==== Extended blend state ====
+//
+// alphaBlend() above covers the handful of blend modes the older engines used.
+// Deltarune Chapter 3+ instead builds spotlight and stencil masks out of the full
+// blend unit: it clears the destination *alpha* channel, draws a shape into it, and
+// then blends the scene with (bm_inv_dest_alpha, bm_dest_alpha) so only the pixels
+// outside the shape are painted. Without that the whole screen just stays covered by
+// the mask, which is what makes the Chapter 3 intro look like a black screen.
+//
+// The state lives on the renderer and is reduced to a `pixelMode` by
+// swrSetupBlendState(), so the draw loops only pay for one predictable branch:
+//
+//   0  legacy          - alphaBlend(), the fast paths everyone else uses
+//   1  replace         - gpu_set_blendenable(false)
+//   2  stencil select  - (bm_inv_dest_alpha, bm_dest_alpha), the mask pass
+//   3  generic         - any other gpu_set_blendmode_ext pair
+
+#define SWR_PIXEL_LEGACY  0
+#define SWR_PIXEL_REPLACE 1
+#define SWR_PIXEL_SELECT  2
+#define SWR_PIXEL_GENERIC 3
+
+#define SWR_ALPHA_BIT 0x8000
+#define SWR_COLOR_BITS 0x7FFF
+
+// Maps a 5-bit channel value to the 0..256 fixed point range the blend factors use.
+FORCE_INLINE int swrFactor5(int value)
+{
+    return (value * 256 + 15) / 31;
+}
+
+// One factor of the GL blend equation, in 0..256 fixed point.
+FORCE_INLINE int swrBlendFactor(int factor, int srcChan, int dstChan, int srcAlpha, int dstAlpha)
+{
+    switch (factor)
+    {
+        case bm_zero:           return 0;
+        case bm_one:            return 256;
+        case bm_src_color:      return swrFactor5(srcChan);
+        case bm_inv_src_color:  return 256 - swrFactor5(srcChan);
+        case bm_src_alpha:      return srcAlpha;
+        case bm_inv_src_alpha:  return 256 - srcAlpha;
+        case bm_dest_alpha:     return dstAlpha;
+        case bm_inv_dest_alpha: return 256 - dstAlpha;
+        case bm_dest_color:     return swrFactor5(dstChan);
+        case bm_inv_dest_color: return 256 - swrFactor5(dstChan);
+        case bm_src_alpha_sat:
+        {
+            int remaining = 256 - dstAlpha;
+            return srcAlpha < remaining ? srcAlpha : remaining;
+        }
+        default:                return 256;
+    }
+}
+
+// Turns the raw GPU state into the pixel mode the draw loops switch on.
+FORCE_INLINE void swrSetupBlendState(SWRenderer* swr)
+{
+    if (!swr->blendEnabled)
+    {
+        swr->pixelMode = SWR_PIXEL_REPLACE;
+    }
+    else if (swr->blendSrcFactor == 0)
+    {
+        // The blendMode enum is in charge. It is expressible as a factor pair for
+        // the two modes that matter, but only the general path can apply a colour
+        // write mask, so drop out of the legacy path when one is set.
+        bool maskActive = swr->writeMask != WRITE_MASK_ALL;
+        if (maskActive && (swr->blendMode == bm_normal || swr->blendMode == bm_add))
+            swr->pixelMode = SWR_PIXEL_GENERIC;
+        else
+            swr->pixelMode = SWR_PIXEL_LEGACY;
+    }
+    else if (swr->blendSrcFactor == bm_inv_dest_alpha && swr->blendDstFactor == bm_dest_alpha)
+        swr->pixelMode = SWR_PIXEL_SELECT;
+    else
+        swr->pixelMode = SWR_PIXEL_GENERIC;
+}
+
+// Channel bits a gpu_set_colorwriteenable mask writes.
+FORCE_INLINE uint16_t swrWriteMaskBits(int writeMask)
+{
+#if PIXEL_SIZE == 16
+    uint16_t bits = 0;
+    if (writeMask & WRITE_MASK_RED)   bits |= 0x7C00;
+    if (writeMask & WRITE_MASK_GREEN) bits |= 0x03E0;
+    if (writeMask & WRITE_MASK_BLUE)  bits |= 0x001F;
+    if (writeMask & WRITE_MASK_ALPHA) bits |= SWR_ALPHA_BIT;
+    return bits;
+#else
+    (void) writeMask;
+    return 0xFFFF;
+#endif
+}
+
+// Blends one covered source pixel into the destination using the extended state.
+// `srcAlpha` is the fragment alpha (draw alpha once the source pixel is known to be
+// opaque), between 0 and 256.
+FORCE_INLINE void swrBlitPixelEx(SWRenderer* swr, uintpixel_t* dstPtr, uintpixel_t srcPixel,
+                                 int srcAlpha, uint16_t maskBits)
+{
+#if PIXEL_SIZE == 16
+    if (swr->alphaTestEnabled && srcAlpha * 255 < swr->alphaTestRef * 256)
+        return;
+
+    uintpixel_t dst = *dstPtr;
+    uintpixel_t result;
+
+    switch (swr->pixelMode)
+    {
+        case SWR_PIXEL_REPLACE:
+            // GL with blending disabled: the fragment replaces the destination.
+            result = (uintpixel_t) ((srcPixel & SWR_COLOR_BITS) | (srcAlpha > 127 ? SWR_ALPHA_BIT : 0));
+            break;
+
+        case SWR_PIXEL_SELECT:
+            // (bm_inv_dest_alpha, bm_dest_alpha): paint where the destination is
+            // transparent, leave it alone where it is opaque. This is the mask pass.
+            if (dst & SWR_ALPHA_BIT)
+                return;
+            result = (uintpixel_t) ((srcPixel & SWR_COLOR_BITS) | (srcAlpha > 127 ? SWR_ALPHA_BIT : 0));
+            break;
+
+        default:
+        {
+            const int sr = (srcPixel >> 10) & 0x1F;
+            const int sg = (srcPixel >> 5) & 0x1F;
+            const int sb = srcPixel & 0x1F;
+            const int dr = (dst >> 10) & 0x1F;
+            const int dg = (dst >> 5) & 0x1F;
+            const int db = dst & 0x1F;
+            const int dstAlpha = (dst & SWR_ALPHA_BIT) ? 256 : 0;
+
+            int sf = swr->blendSrcFactor, df = swr->blendDstFactor;
+            if (sf == 0)
+            {
+                // A colour write mask with the plain blend modes: bm_normal and
+                // bm_add are both expressible as a factor pair.
+                if (swr->blendMode == bm_add) { sf = bm_src_alpha; df = bm_one; }
+                else { sf = bm_src_alpha; df = bm_inv_src_alpha; }
+            }
+
+            int r = (sr * swrBlendFactor(sf, sr, dr, srcAlpha, dstAlpha) +
+                     dr * swrBlendFactor(df, sr, dr, srcAlpha, dstAlpha)) >> 8;
+            int g = (sg * swrBlendFactor(sf, sg, dg, srcAlpha, dstAlpha) +
+                     dg * swrBlendFactor(df, sg, dg, srcAlpha, dstAlpha)) >> 8;
+            int b = (sb * swrBlendFactor(sf, sb, db, srcAlpha, dstAlpha) +
+                     db * swrBlendFactor(df, sb, db, srcAlpha, dstAlpha)) >> 8;
+
+            int sa5 = srcAlpha >> 3, da5 = dstAlpha >> 3;
+            int a = (sa5 * swrBlendFactor(sf, sa5, da5, srcAlpha, dstAlpha) +
+                     da5 * swrBlendFactor(df, sa5, da5, srcAlpha, dstAlpha)) >> 8;
+
+            if (r < 0) r = 0; else if (r > 31) r = 31;
+            if (g < 0) g = 0; else if (g > 31) g = 31;
+            if (b < 0) b = 0; else if (b > 31) b = 31;
+
+            result = (uintpixel_t) ((a >= 16 ? SWR_ALPHA_BIT : 0) | (r << 10) | (g << 5) | b);
+            break;
+        }
+    }
+
+    *dstPtr = (uintpixel_t) ((dst & ~maskBits) | (result & maskBits));
+#else
+    (void) swr; (void) dstPtr; (void) srcPixel; (void) srcAlpha; (void) maskBits;
 #endif
 }
 

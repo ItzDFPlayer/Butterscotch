@@ -123,7 +123,22 @@ typedef struct
     float defaultScaleX, defaultScaleY;
     
     int blendMode;
-    
+
+    // Full GPU blend state, as set through gpu_set_blendenable,
+    // gpu_set_blendmode_ext, gpu_set_alphatestenable/ref and
+    // gpu_set_colorwriteenable. Deltarune Chapter 3+ builds its spotlight/stencil
+    // masks out of these instead of plain sprite blending, so they cannot be
+    // stubbed out. `blendSrcFactor == 0` means "the blendMode enum above is in
+    // charge", which is the state almost every draw is in.
+    bool blendEnabled;
+    int blendSrcFactor;
+    int blendDstFactor;
+    bool alphaTestEnabled;
+    int alphaTestRef;     // 0..255, compared against the fragment alpha
+    // Derived from the three fields above plus writeMask; see swrSetupBlendState.
+    // 0 = legacy path (alphaBlend), and anything else selects the general blitter.
+    int pixelMode;
+
     // only used for surfaces.  The application surface doesn't support these at the moment.
     int currentSurfaceIndex;
     int writeMask;

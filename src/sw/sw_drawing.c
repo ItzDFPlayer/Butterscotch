@@ -29,6 +29,41 @@ FORCE_INLINE void swrPlotPixel(Renderer* renderer, int x, int y, uintpixel_t col
     alphaBlend(&swr->fb[y * swr->fbPitch + x], color, srcalpha, dstalpha);
 }
 
+// Draws `count` pixels of one colour through the extended blend state. This is the
+// path the Chapter 3 mask scripts take: they fill the whole camera rectangle while
+// only the alpha channel is writable, to clear or restore the stencil.
+static void swrDrawSpanEx(SWRenderer* swr, int x, int y, int count, uintpixel_t color, int alpha, uint16_t maskBits)
+{
+    uintpixel_t* dstline = &swr->fb[y * swr->fbPitch + x];
+    int srcAlpha = alpha < 0 ? 0 : (alpha > 256 ? 256 : alpha);
+    uintpixel_t srcPixel = (uintpixel_t) ((color & 0x7FFF) | 0x8000);
+
+    if (swr->alphaTestEnabled && srcAlpha * 255 < swr->alphaTestRef * 256)
+        return;
+
+    if (swr->pixelMode == SWR_PIXEL_REPLACE)
+    {
+        // Same result for every pixel, so this reduces to a masked memset.
+        uintpixel_t value = (uintpixel_t) ((srcPixel & SWR_COLOR_BITS) | (srcAlpha > 127 ? SWR_ALPHA_BIT : 0));
+        if (maskBits == 0xFFFF)
+        {
+            for (int i = 0; i < count; i++) dstline[i] = value;
+        }
+        else
+        {
+            for (int i = 0; i < count; i++)
+            {
+                uintpixel_t dst = dstline[i];
+                dstline[i] = (uintpixel_t) ((dst & ~maskBits) | (value & maskBits));
+            }
+        }
+        return;
+    }
+
+    for (int i = 0; i < count; i++)
+        swrBlitPixelEx(swr, &dstline[i], srcPixel, srcAlpha, maskBits);
+}
+
 static void swrDrawHLineInt(Renderer* renderer, int dx, int dy, int dw, uintpixel_t color, UNUSED uintpixel_t color2, int alpha)
 {
     SWRenderer *swr = (SWRenderer*) renderer;
@@ -38,6 +73,12 @@ static void swrDrawHLineInt(Renderer* renderer, int dx, int dy, int dw, uintpixe
     if (dx < swr->portX) { dw += dx - swr->portX; dx = swr->portX; }
     if (dx + dw >= swr->maxX) dw = swr->maxX - dx;
     if (dw <= 0) return;
+
+    if (swr->pixelMode != SWR_PIXEL_LEGACY)
+    {
+        swrDrawSpanEx(swr, dx, dy, dw, color, alpha, swrWriteMaskBits(swr->writeMask));
+        return;
+    }
     
     int srcalpha = swrCalcSrcAlpha(swr, alpha);
     int invalpha = swrCalcDstAlpha(swr, alpha);
@@ -92,6 +133,14 @@ static void swrDrawVLineInt(Renderer* renderer, int dx, int dy, int dh, uintpixe
     if (dy < swr->portY) { dh += dy - swr->portY; dy = swr->portY; }
     if (dy + dh >= swr->maxY) dh = swr->maxY - dy;
     if (dh <= 0) return;
+
+    if (swr->pixelMode != SWR_PIXEL_LEGACY)
+    {
+        uint16_t maskBits = swrWriteMaskBits(swr->writeMask);
+        for (int i = 0; i < dh; i++)
+            swrDrawSpanEx(swr, dx, dy + i, 1, color, alpha, maskBits);
+        return;
+    }
     
     int srcalpha = swrCalcSrcAlpha(swr, alpha);
     int invalpha = swrCalcDstAlpha(swr, alpha);
@@ -589,6 +638,40 @@ static void swrDrawSpriteInternal(
     int srcalpha = swrCalcSrcAlpha(swr, alpha);
     int invalpha = swrCalcDstAlpha(swr, alpha);
 
+    // Extended GPU state (Chapter 3+'s stencil masks). Handled by a plain scalar
+    // loop that consults the blend unit per pixel, because none of the fast paths
+    // below can express "write the alpha channel only" or blended destinations.
+    if (swr->pixelMode != SWR_PIXEL_LEGACY)
+    {
+        const uint16_t maskBits = swrWriteMaskBits(swr->writeMask);
+        const int extAlpha = alpha < 0 ? 0 : (alpha > 256 ? 256 : alpha);
+        const bool extTint = !swrTintIsWhite(tintColor);
+
+        swr->pxWritten += (uint64_t) dw * (uint64_t) dh;
+        swr->pxScalarBlend += (uint64_t) dw * (uint64_t) dh;
+
+        fixedp_t ys2 = iys2;
+        for (int y = 0, ys = iys; y < dh; y++, ys += oys, ys2 += oys2)
+        {
+            uintpixel_t* dstline = &swr->fb[(dy + y) * swr->fbPitch + dx];
+            const uintpixel_t* srcline;
+            if (dh == sh)
+                srcline = &texture->buffer[(sy + ys) * texture->width + sx];
+            else
+                srcline = &texture->buffer[(sy + (int)(ys2 >> fp_prec)) * texture->width + sx];
+
+            fixedp_t xs2 = ixs2;
+            for (int x = 0; x < dw; x++, xs2 += oxs2)
+            {
+                uintpixel_t pixel = srcline[(int)(xs2 >> fp_prec)];
+                if (!opaque(pixel)) continue;
+                swrBlitPixelEx(swr, &dstline[x], extTint ? tint(tintColor, pixel) : pixel,
+                               extAlpha, maskBits);
+            }
+        }
+        return;
+    }
+
     const bool unscaled = (sw == dw && sh == dh && !flipX && !flipY);
     const bool plainCopy = swrTintIsWhite(tintColor) && srcalpha > 253 && invalpha < 3;
 
@@ -753,6 +836,11 @@ static void swrDrawSpriteRotatedInternal(
     
     int srcalpha = swrCalcSrcAlpha(swr, alpha);
     int invalpha = swrCalcDstAlpha(swr, alpha);
+
+    const bool extState = (swr->pixelMode != SWR_PIXEL_LEGACY);
+    const uint16_t extMaskBits = swrWriteMaskBits(swr->writeMask);
+    const int extAlpha = alpha < 0 ? 0 : (alpha > 256 ? 256 : alpha);
+    const bool extTint = !swrTintIsWhite(tintColor);
     
     for (int cy = minYc; cy < maxYc; cy++)
     {
@@ -789,7 +877,13 @@ static void swrDrawSpriteRotatedInternal(
             
             uintpixel_t src = texture->buffer[ty * texture->width + tx];
             
-            if (opaque(src))
+            if (extState)
+            {
+                if (opaque(src))
+                    swrBlitPixelEx(swr, &dstline[cx], extTint ? tint(tintColor, src) : src,
+                                   extAlpha, extMaskBits);
+            }
+            else if (opaque(src))
                 alphaBlend(&dstline[cx], tint(tintColor, src), srcalpha, invalpha);
         }
     }
@@ -954,15 +1048,19 @@ bool swrSwitchToSurface(Renderer* renderer, int32_t targetSurfaceId, bool restor
             return true;
         
         // restore the original framebuffer
-        fprintf(stderr, "back to original framebuffer\n");
         swr->drawingToSurface = false;
         swr->fb = swr->mainFb;
         swr->width = swr->mainWidth;
         swr->height = swr->mainHeight;
         swr->fbPitch = swr->mainPitch;
         swr->blendMode = bm_normal;
+        swr->blendSrcFactor = 0;
+        swr->blendDstFactor = 0;
+        swr->blendEnabled = true;
+        swr->alphaTestEnabled = false;
         swr->currentSurfaceIndex = -1;
         swr->writeMask = WRITE_MASK_ALL;
+        swrSetupBlendState(swr);
         
         if (restoreOldView) {
             // restore the old transform, if needed
@@ -1023,16 +1121,19 @@ bool swrSwitchToSurface(Renderer* renderer, int32_t targetSurfaceId, bool restor
     swr->fbPitch = surface->width;
     swr->drawingToSurface = true;
     swr->blendMode = bm_normal;
+    swr->blendSrcFactor = 0;
+    swr->blendDstFactor = 0;
+    swr->blendEnabled = true;
+    swr->alphaTestEnabled = false;
     swr->currentSurfaceIndex = targetSurfaceId;
     swr->writeMask = WRITE_MASK_ALL;
+    swrSetupBlendState(swr);
     
     swr->viewX = swr->portX = 0;
     swr->viewY = swr->portY = 0;
     swr->maxX = swr->viewW = swr->portW = surface->width;
     swr->maxY = swr->viewH = swr->portH = surface->height;
     swr->scaleX = swr->scaleY = 1.0f;
-    
-    fprintf(stderr, "switching to surface %p, fb %p, %dx%d\n", surface, swr->fb, swr->width, swr->height);
     
     return true;
 }
