@@ -63,6 +63,11 @@ static char* ffmpegFileUrl(const char* path) {
 // decoder burns its whole frame budget here, so the cap keeps a hitch bounded.
 #define VIDEO_MAX_CATCHUP_FRAMES 12
 #define VIDEO_MASTER_JUMP_SECONDS 0.25
+// How many updates in a row a master (audio) clock may report the same position
+// before it is treated as unusable. A backend that cannot report the position of a
+// streamed sound returns 0 forever, and trusting that froze the first frame while
+// the sound played on.
+#define VIDEO_MASTER_STALL_TICKS 30
 
 typedef struct {
     AVFormatContext* formatCtx;
@@ -87,8 +92,11 @@ typedef struct {
     double masterAnchorClock;     // Audio position that masterAnchorVideoTime maps to.
     double masterAnchorVideoTime; // Video time the master clock is anchored to.
     double lastMasterClock;
+    double stallLastClock;        // Previous master clock, for the stall check.
+    int32_t stalledMasterTicks;   // Consecutive updates the master clock did not move.
     bool hasMasterSample;
     bool masterClockValid;        // The audio track is driving playback.
+    bool masterClockUnusable;     // Never trust this video's audio clock again.
 
     double durationSeconds;
     bool hasVideo;
@@ -109,15 +117,38 @@ static bool ffmpegVideoDecoderMasterClockJumped(FfmpegVideoDecoder* d, double po
 
 static double ffmpegVideoDecoderTargetSeconds(FfmpegVideoDecoder* d, uint64_t now) {
     if (d->masterClockValid) {
-        if (!d->hasMasterSample || ffmpegVideoDecoderMasterClockJumped(d, d->masterClock)) {
-            d->masterAnchorClock = d->masterClock;
-            d->masterAnchorVideoTime = d->hasFrame ? d->presentedSeconds : 0;
-            d->hasMasterSample = true;
+        // A clock that never moves cannot drive the picture. Some audio backends
+        // report a constant (or zero) position for a streamed sound, which left the
+        // video frozen on its first frame for the whole cutscene while the sound kept
+        // playing, so give up on such a clock and fall back to the monotonic one.
+        if (d->masterClock <= d->stallLastClock + 0.000001) {
+            d->stalledMasterTicks++;
+        } else {
+            d->stalledMasterTicks = 0;
         }
-        return d->masterAnchorVideoTime + (d->masterClock - d->masterAnchorClock);
+        d->stallLastClock = d->masterClock;
+
+        if (d->stalledMasterTicks > VIDEO_MASTER_STALL_TICKS) {
+            logInfo("Video: audio clock stuck at %.3fs, following the wall clock\n", d->masterClock);
+            d->masterClockValid = false;
+            d->masterClockUnusable = true;
+            d->hasMasterSample = false;
+            d->stalledMasterTicks = 0;
+            d->clockStarted = false;
+        } else {
+            if (!d->hasMasterSample || ffmpegVideoDecoderMasterClockJumped(d, d->masterClock)) {
+                d->masterAnchorClock = d->masterClock;
+                d->masterAnchorVideoTime = d->hasFrame ? d->presentedSeconds : 0;
+                d->hasMasterSample = true;
+            }
+            return d->masterAnchorVideoTime + (d->masterClock - d->masterAnchorClock);
+        }
     }
     if (!d->clockStarted) {
-        d->startNanos = now;
+        // Start the wall clock at the frame that is on screen, not at zero: this also
+        // runs when the audio clock was abandoned part-way through a video.
+        double baseSeconds = d->hasFrame ? d->presentedSeconds : 0.0;
+        d->startNanos = now - (uint64_t) (baseSeconds * 1e9);
         d->clockStarted = true;
     }
     return (double) (now - d->startNanos) / 1000000000.0;
@@ -193,13 +224,22 @@ static void ffmpegVideoDecoderSetMasterClock(VideoDecoder* decoder, double posit
     d->masterClock = positionSeconds;
     d->lastMasterClock = positionSeconds;
     d->hasMasterSample = positionSeconds >= 0;
-    d->masterClockValid = positionSeconds >= 0;
+    d->masterClockValid = positionSeconds >= 0 && !d->masterClockUnusable;
 }
 
 static int32_t ffmpegVideoDecoderUpdate(VideoDecoder* decoder) {
     FfmpegVideoDecoder* d = (FfmpegVideoDecoder*) decoder->impl;
     if (d == nullptr || d->formatCtx == nullptr || !d->hasVideo) return VIDEO_FRAME_NONE;
     if (d->finished) return VIDEO_FRAME_NONE;
+
+    // BUTTERSCOTCH_LOG_VIDEO=1 prints one line a second with everything that decides
+    // whether the picture moves: the clock the decoder follows, the frame time it is
+    // showing, and how many frames each update considered due.
+    static int logVideo = -1;
+    if (logVideo < 0) {
+        const char* env = getenv("BUTTERSCOTCH_LOG_VIDEO");
+        logVideo = (env != nullptr && env[0] != '\0' && env[0] != '0') ? 1 : 0;
+    }
 
     uint64_t now = nowNanos();
     double targetSeconds = ffmpegVideoDecoderTargetSeconds(d, now);
@@ -209,6 +249,18 @@ static int32_t ffmpegVideoDecoderUpdate(VideoDecoder* decoder) {
         return VIDEO_FRAME_HELD;
     }
     framesToDecode = ffmpegVideoDecoderFramesDue(d, targetSeconds);
+
+    if (logVideo) {
+        static uint64_t lastLog = 0;
+        if (now - lastLog >= 1000000000ull) {
+            lastLog = now;
+            logInfo("Video: target=%.2f shown=%.2f nextDue=%.2f due=%d clock=%s(%.2f) audio=%d\n",
+                    targetSeconds, d->presentedSeconds, d->nextDueSeconds, framesToDecode,
+                    d->masterClockValid ? "audio" : "wall", d->masterClock,
+                    d->masterClockUnusable ? -1 : 0);
+        }
+    }
+
     if (framesToDecode <= 0) return VIDEO_FRAME_HELD;
 
     bool gotFrame = false;
@@ -355,8 +407,11 @@ static void ffmpegVideoDecoderClose(VideoDecoder* decoder) {
     d->masterAnchorClock = 0;
     d->masterAnchorVideoTime = 0;
     d->lastMasterClock = 0;
+    d->stallLastClock = 0;
+    d->stalledMasterTicks = 0;
     d->hasMasterSample = false;
     d->masterClockValid = false;
+    d->masterClockUnusable = false;
     d->durationSeconds = 0;
     d->hasVideo = false;
     d->eof = false;
@@ -451,8 +506,11 @@ static bool ffmpegVideoDecoderOpen(VideoDecoder* decoder, const char* url) {
     d->masterAnchorClock = 0;
     d->masterAnchorVideoTime = 0;
     d->lastMasterClock = 0;
+    d->stallLastClock = 0;
+    d->stalledMasterTicks = 0;
     d->hasMasterSample = false;
     d->masterClockValid = false;
+    d->masterClockUnusable = false;
 
     logInfo("Video: opened '%s' (%dx%d, %.1fs, %.2f fps)\n", url, d->width, d->height, d->durationSeconds, fps);
     return true;
