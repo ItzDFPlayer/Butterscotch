@@ -5,6 +5,7 @@
 #include "text_utils.h"
 #include "image/image_decoder.h"
 #include "stb_image_write.h"
+#include "debug_font/debug_font.h"
 
 #include "sw_renderer_private.h"
 

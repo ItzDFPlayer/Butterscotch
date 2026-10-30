@@ -45,6 +45,12 @@ bool SWRenderer_pageIsSubPage(Renderer* renderer, int32_t pageId);
 // logged so they can be compared against the instances that were on stage.
 void SWRenderer_setDrawTrace(Renderer* renderer, bool enabled);
 
+// Draws a short debug string (fps, memory) straight into the framebuffer using the
+// built-in 8x8 debug font, with a one-pixel shadow so it stays readable over any
+// scene. `scale` is 0..1 of the font's natural size; 0.25 gives readable 11px text
+// at 640x480. Only the software renderer has this, which is where it is needed.
+void SWRenderer_drawOverlayText(Renderer* renderer, int x, int y, float scale, const char* text);
+
 // Writes the finished framebuffer to `path` as an RGBA PNG. Used by the debug
 // capture key so a bug can be reported without a screen grabber: the software
 // renderer has no GL readback path, so this is the only way to get the exact

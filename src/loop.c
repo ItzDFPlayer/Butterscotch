@@ -102,6 +102,19 @@ typedef struct {
 } BS_PROCESS_MEMORY_COUNTERS;
 #endif
 
+// True when `button` was pressed on any connected pad while the Menu button is
+// being held. Used for the runtime toggles (Menu + L2 / Menu + R2).
+static bool gamepadMenuComboPressed(Runner* runner, int32_t button) {
+    if (runner == nullptr || runner->gamepads == nullptr) return false;
+
+    for (int32_t device = 0; device < MAX_GAMEPADS; device++) {
+        if (!RunnerGamepad_isConnected(runner->gamepads, device)) continue;
+        if (!RunnerGamepad_buttonCheck(runner->gamepads, device, GP_HOME)) continue;
+        if (RunnerGamepad_buttonCheckPressed(runner->gamepads, device, button)) return true;
+    }
+    return false;
+}
+
 static size_t get_used_memory(void) {
 #if defined(__linux__)
     {
@@ -1484,6 +1497,23 @@ int loop(CommandLineArgs args, const char *argv0) {
         // Room-change texture prefetch: decode the incoming room's pages once,
         // behind the loading bar, instead of stalling inside the first draw calls.
         const Room* prefetchLastRoom = nullptr;
+
+        // Runtime toggles: Menu+L2 shows the fps/memory overlay, Menu+R2 enables
+        // adaptive frame skipping. F7/F8 do the same on a keyboard.
+        bool showPerfOverlay = false;
+        bool frameSkipEnabled = false;
+        bool captureRequested = false;
+        bool traceRequested = false;
+        // Set when this iteration deliberately draws nothing (adaptive frame skip).
+        bool skippingDraw = false;
+        int frameSkipRun = 0;
+        uint32_t overlayFrames = 0;
+        uint32_t overlaySkipped = 0;
+        uint64_t overlayWindowStart = nowNanos();
+        double overlayFps = 0.0;
+        double overlayFrameMs = 0.0;
+        uint32_t overlayMemBytes = 0;
+
         while (true) {
             if (runner->shouldExit || shouldWindowClose) {
                 actuallyShuttingDown = true;
@@ -1676,6 +1706,41 @@ int loop(CommandLineArgs args, const char *argv0) {
             }
 
             if (shouldStep) {
+                // Menu + L2 / Menu + R2 toggles and the F9 capture request. These sit
+                // after the step because input recordings are injected just before it.
+                if (gamepadMenuComboPressed(runner, GP_SHOULDERLB) ||
+                    RunnerKeyboard_checkPressed(runner->keyboard, VK_F7)) {
+                    showPerfOverlay = !showPerfOverlay;
+                    logInfo("Overlay: %s\n", showPerfOverlay ? "on" : "off");
+                }
+                if (gamepadMenuComboPressed(runner, GP_SHOULDERRB) ||
+                    RunnerKeyboard_checkPressed(runner->keyboard, VK_F8)) {
+                    frameSkipEnabled = !frameSkipEnabled;
+                    frameSkipRun = 0;
+                    logInfo("Frame skip: %s\n", frameSkipEnabled ? "on" : "off");
+                }
+                if (gfx == SOFTWARE && RunnerKeyboard_checkPressed(runner->keyboard, VK_F9)) {
+                    captureRequested = true;
+                    traceRequested = true;
+                }
+
+                // Fps / frame-time window: first sample after a quarter second so the
+                // overlay has numbers immediately, then once a second.
+                overlayFrames++;
+                {
+                    uint64_t overlayNow = nowNanos();
+                    uint64_t elapsedNs = overlayNow - overlayWindowStart;
+                    if (elapsedNs >= (overlayFps > 0.0 ? 1000000000ull : 250000000ull)) {
+                        overlayFps = (double) overlayFrames * 1e9 / (double) elapsedNs;
+                        overlayFrameMs = (double) elapsedNs / (double) overlayFrames / 1e6;
+                        overlayMemBytes = (uint32_t) get_used_memory();
+                        overlayFrames = 0;
+                        overlaySkipped = 0;
+                        overlayWindowStart = overlayNow;
+                    }
+                }
+
+
                 if (args.profilerFramesBetween > 0 && runner->frameCount > 0 && runner->frameCount % args.profilerFramesBetween == 0) {
                     char* profilerReport = Profiler_createReport(vm->profiler, 20, args.profilerFramesBetween);
                     if (profilerReport != nullptr) {
@@ -1735,6 +1800,27 @@ int loop(CommandLineArgs args, const char *argv0) {
             platformGetWindowSize(&fbWidth, &fbHeight);
 
             if (shouldRender) {
+                // Adaptive frame skipping: if the previous frame overran the room's
+                // step period we are running the game in slow motion, so draw every
+                // other frame instead and let the logic clock catch up. Three skips in
+                // a row at most, so the screen still updates several times a second.
+                skippingDraw = false;
+                if (frameSkipEnabled && runner->currentRoom != nullptr && runner->currentRoom->speed > 0) {
+                    double periodMs = 1000.0 / (double) runner->currentRoom->speed;
+                    double prevFrameMs = (double) runner->deltaTime / 1000.0;
+                    if (prevFrameMs > periodMs * 1.1 && frameSkipRun < 3 && !captureRequested) {
+                        skippingDraw = true;
+                        frameSkipRun++;
+                        overlaySkipped++;
+                    } else {
+                        frameSkipRun = 0;
+                    }
+                }
+                if (skippingDraw) {
+                    perfAfterDraw = perfAfterStep;
+                    goto afterDraw;
+                }
+
                 // Clear the default framebuffer (window background) to black
 #ifdef ENABLE_SW_RENDERER
                 if (gfx == SOFTWARE && shouldRender)
@@ -1786,24 +1872,15 @@ int loop(CommandLineArgs args, const char *argv0) {
                     }
                 }
 
-                // Set by F9: the following frame is traced, which is the frame the
-                // capture itself could not cover (it is already drawn by then).
-                static bool traceNextFrame = false;
-
-                bool tracingThisFrame = args.traceFrame >= 0 && runner->frameCount == args.traceFrame;
+                // --trace-frame, or an F9 capture: log what is on stage and then every
+                // draw of this frame, so "this sprite is missing" can be answered with
+                // data instead of guesswork.
+                bool tracingThisFrame = traceRequested ||
+                                        (args.traceFrame >= 0 && runner->frameCount == args.traceFrame);
                 if (tracingThisFrame) {
+                    traceRequested = false;
                     logInstances(runner);
                     if (gfx == SOFTWARE) SWRenderer_setDrawTrace(renderer, true);
-                }
-
-                // --trace-frame, or the frame after an F9 capture: log what is on
-                // stage and then every draw of that frame, so "this sprite is missing"
-                // can be answered with data instead of guesswork.
-                if (traceNextFrame) {
-                    traceNextFrame = false;
-                    logInstances(runner);
-                    if (gfx == SOFTWARE) SWRenderer_setDrawTrace(renderer, true);
-                    tracingThisFrame = true;
                 }
 
                 Runner_drawPre(runner, fbWidth, fbHeight);
@@ -1825,7 +1902,6 @@ int loop(CommandLineArgs args, const char *argv0) {
                 Runner_drawGUI(runner, fbWidth, fbHeight, gameW, gameH);
                 perfAfterDraw = nowNanos();
 
-<<<<<<< HEAD
                 if (showDebugOverlay && renderer->vtable->drawTextUI != nullptr) {
                     renderer->vtable->beginGUI(renderer, fbWidth, fbHeight, 0, 0, fbWidth, fbHeight, RENDER_TARGET_HOST_FRAMEBUFFER);
 
@@ -1861,7 +1937,24 @@ int loop(CommandLineArgs args, const char *argv0) {
 
                     renderer->vtable->endGUI(renderer);
                 }
+
+                // The handheld's own overlay: drawn straight into the software
+                // framebuffer, so it needs no GL state and works on the device.
+                if (showPerfOverlay && gfx == SOFTWARE) {
+                    char overlayText[160];
+                    snprintf(overlayText, sizeof(overlayText),
+                             "FPS %.1f  FRAME %.1f MS\nMEM %.1f MB  SKIP %d/S %s",
+                             overlayFps, overlayFrameMs, (double) overlayMemBytes / (1024.0 * 1024.0),
+                             (int) overlaySkipped, frameSkipEnabled ? "ON" : "OFF");
+                    SWRenderer_drawOverlayText(renderer, 4, 4, 0.28f, overlayText);
+                }
+
+                if (tracingThisFrame && gfx == SOFTWARE) {
+                    SWRenderer_setDrawTrace(renderer, false);
+                    logInfo("TRACE end frame %d\n", runner->frameCount);
+                }
             }
+
 
             if (runner->paused && enteringPause && !runner->debugMode) {
                 int32_t winW = fbWidth;
@@ -1888,19 +1981,12 @@ int loop(CommandLineArgs args, const char *argv0) {
 
                 renderer->vtable->endGUI(renderer);
             }
-=======
-                if (tracingThisFrame && gfx == SOFTWARE) {
-                    SWRenderer_setDrawTrace(renderer, false);
-                    logInfo("TRACE end frame %d\n", runner->frameCount);
-                }
-
->>>>>>> 768ad6b3 (feat(debug): trace a frame's draws and the instances behind them)
                 // Debug capture: F9 writes the finished frame to a PNG next to the
                 // working directory and drops a marker in the log, so a rendering bug
                 // can be reported from a machine without any screen capture tooling
                 // (the software renderer has no GL readback).
-                if (gfx == SOFTWARE && RunnerKeyboard_checkPressed(runner->keyboard, VK_F9)) {
-                    traceNextFrame = true;
+                if (gfx == SOFTWARE && captureRequested) {
+                    captureRequested = false;
                     char capturePath[256];
                     snprintf(capturePath, sizeof(capturePath), "swshot_%05d.png", runner->frameCount);
                     if (SWRenderer_captureFramebuffer(renderer, capturePath))
@@ -1943,8 +2029,10 @@ int loop(CommandLineArgs args, const char *argv0) {
 
             // Only present a new frame when we actually rendered one. This includes the first paused frame so the
             // pause overlay can be presented once, and all later paused frames stay frozen without re-swapping.
-            if (runner->pendingRoom == -1 && shouldRender)
+            if (runner->pendingRoom == -1 && shouldRender && !skippingDraw)
                 platformSwapBuffers();
+
+        afterDraw:;
             if (shouldStep) {
                 Runner_handlePendingRoomChange(runner);
 

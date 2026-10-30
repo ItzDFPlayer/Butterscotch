@@ -477,6 +477,10 @@ if(PLATFORM STREQUAL "cli" OR PLATFORM STREQUAL "vita" OR PLATFORM STREQUAL "swi
     if(ENABLE_SW_RENDERER)
         file(GLOB GL_SOURCES ${GL_SOURCES} src/sw/*.c)
         target_include_directories(butterscotch PRIVATE ${CMAKE_SOURCE_DIR}/src/sw)
+        # The built-in debug font is what the fps/memory overlay is drawn with.
+        file(GLOB DEBUG_FONT_SOURCES src/debug_font/debug_font.c)
+        target_sources(butterscotch PRIVATE ${DEBUG_FONT_SOURCES})
+        target_include_directories(butterscotch PRIVATE ${CMAKE_SOURCE_DIR}/src/debug_font)
     endif()
     target_sources(butterscotch PRIVATE ${GL_SOURCES})
     target_include_directories(butterscotch PRIVATE ${CMAKE_SOURCE_DIR}/src/image)
