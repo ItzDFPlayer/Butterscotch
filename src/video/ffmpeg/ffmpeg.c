@@ -56,9 +56,11 @@ static char* ffmpegFileUrl(const char* path) {
 #define VIDEO_AUDIO_CHANNELS 2
 #define VIDEO_AUDIO_SAMPLE_RATE 48000
 
-// The screen is 640x480, so decoding a 720p cutscene into a 1280x720 surface only
-// makes the upload and the game's draw four times more expensive than they need to be.
-#define VIDEO_DEFAULT_MAX_WIDTH 640
+// A smaller surface would make the upload and the game's draw of it much cheaper, but
+// the game lays the video out itself and assumes it is the size the file says: a
+// downscaled surface shows up in the top left corner, cropped. Off by default, on with
+// BUTTERSCOTCH_VIDEO_SCALE for anyone who wants to trade framing for speed.
+#define VIDEO_DEFAULT_MAX_WIDTH 0
 
 #define VIDEO_FALLBACK_FPS 30.0
 #define VIDEO_MIN_FPS 1.0
@@ -71,7 +73,11 @@ static char* ffmpegFileUrl(const char* path) {
 // decoding every frame. A 1280x720 H.264 cutscene decodes at ~14 fps on the A7, so a
 // 24 fps video can never keep up: without a jump the picture drifts further behind for
 // the whole cutscene and the video ends long after the game thinks it did.
-#define VIDEO_SEEK_AHEAD_SECONDS 0.5
+#define VIDEO_SEEK_AHEAD_SECONDS 1.0
+// How far past the clock a jump aims. avformat_seek_file lands on the keyframe before
+// the requested time, and on this CPU decoding forward from that keyframe costs far
+// more than the jump saves, so aim past the clock and show whatever keyframe is there.
+#define VIDEO_SEEK_LEAD_SECONDS 1.0
 // How many updates in a row a master (audio) clock may report the same position
 // before it is treated as unusable. A backend that cannot report the position of a
 // streamed sound returns 0 forever, and trusting that froze the first frame while
@@ -109,6 +115,8 @@ typedef struct {
     bool masterClockValid;        // The audio track is driving playback.
     bool masterClockUnusable;     // Never trust this video's audio clock again.
     bool seekPending;             // A jump is waiting for its first frame to decode.
+    double seekTargetSeconds;     // Video time that jump is heading for.
+    uint32_t decodedSinceLog;     // Frames converted since the last status line.
 
     double durationSeconds;
     bool hasVideo;
@@ -182,7 +190,10 @@ static int32_t ffmpegVideoDecoderConvertFrame(FfmpegVideoDecoder* d, AVFrame* fr
     if (d->swsCtx == nullptr || d->drawPixels == nullptr) return -1;
     uint8_t* dst[1] = { (uint8_t*) d->drawPixels };
     int32_t dstStride[1] = { d->width * 2 };
-    sws_scale(d->swsCtx, (const uint8_t**) frame->data, frame->linesize, 0, d->height, dst, dstStride);
+    // The fifth argument is how many *source* rows to convert, so it is the coded
+    // height and not the output height. Passing the output height converted only the
+    // top half of a downscaled frame and left the rest of the surface black.
+    sws_scale(d->swsCtx, (const uint8_t**) frame->data, frame->linesize, 0, d->srcHeight, dst, dstStride);
 
     double ptsSeconds = ffmpegVideoDecoderPtsSeconds(d, frame->pts);
     if (ptsSeconds >= 0) {
@@ -191,7 +202,7 @@ static int32_t ffmpegVideoDecoderConvertFrame(FfmpegVideoDecoder* d, AVFrame* fr
         d->presentedSeconds = d->hasFrame ? d->presentedSeconds + d->frameDurationSeconds : 0;
     }
     d->hasFrame = true;
-    d->seekPending = false;
+    d->decodedSinceLog++;
     return 0;
 }
 
@@ -231,16 +242,35 @@ static bool ffmpegVideoDecoderRewind(FfmpegVideoDecoder* d) {
 // the cutscene overruns its own length.
 static bool ffmpegVideoDecoderSeekAhead(FfmpegVideoDecoder* d, double seconds) {
     if (d->videoStream == nullptr) return false;
-    int64_t ts = d->startPts + (int64_t) (seconds / av_q2d(d->videoStream->time_base));
+    double seekTo = seconds + VIDEO_SEEK_LEAD_SECONDS;
+    if (d->durationSeconds > 0 && seekTo > d->durationSeconds - 0.2) {
+        seekTo = d->durationSeconds > 0.2 ? d->durationSeconds - 0.2 : 0;
+    }
+    int64_t ts = d->startPts + (int64_t) (seekTo / av_q2d(d->videoStream->time_base));
     if (avformat_seek_file(d->formatCtx, d->videoStreamIndex, INT64_MIN, ts, INT64_MAX, 0) < 0) {
         return false;
     }
     avcodec_flush_buffers(d->videoCodecCtx);
     d->eof = false;
-    d->nextDueSeconds = seconds;
+    d->nextDueSeconds = seekTo;
     d->stalledMasterTicks = 0;
+    d->seekTargetSeconds = seekTo;
     d->seekPending = true;
     return true;
+}
+
+// Shows the first frame the jump lands on, without decoding towards the requested time.
+// Walking from the keyframe to the exact time would cost a whole group of pictures,
+// which on this hardware is slower than simply playing and never getting there.
+static bool ffmpegVideoDecoderTakeSeekFrame(FfmpegVideoDecoder* d) {
+    if (!ffmpegVideoDecoderPullFrame(d)) return false;
+    bool shown = ffmpegVideoDecoderConvertFrame(d, d->videoFrame) == 0;
+    av_frame_unref(d->videoFrame);
+    if (shown) {
+        d->seekPending = false;
+        d->nextDueSeconds = d->presentedSeconds + d->frameDurationSeconds;
+    }
+    return shown;
 }
 
 static void ffmpegVideoDecoderSetMasterClock(VideoDecoder* decoder, double positionSeconds) {
@@ -290,6 +320,13 @@ static int32_t ffmpegVideoDecoderUpdate(VideoDecoder* decoder) {
             logInfo("Video: %.2fs behind, jumped to %.2fs\n", drift, targetSeconds);
         }
     }
+    if (d->seekPending) {
+        if (ffmpegVideoDecoderTakeSeekFrame(d)) {
+            logInfo("Video: jumped, showing %.2fs (clock %.2fs)\n", d->presentedSeconds, targetSeconds);
+            return VIDEO_FRAME_READY;
+        }
+        if (d->finished) return VIDEO_FRAME_NONE;
+    }
 
     framesToDecode = ffmpegVideoDecoderFramesDue(d, targetSeconds);
 
@@ -297,10 +334,12 @@ static int32_t ffmpegVideoDecoderUpdate(VideoDecoder* decoder) {
         static uint64_t lastLog = 0;
         if (now - lastLog >= 1000000000ull) {
             lastLog = now;
-            logInfo("Video: target=%.2f shown=%.2f nextDue=%.2f due=%d clock=%s(%.2f) audio=%d\n",
+            logInfo("Video: target=%.2f shown=%.2f nextDue=%.2f due=%d fps=%u clock=%s(%.2f) audio=%d\n",
                     targetSeconds, d->presentedSeconds, d->nextDueSeconds, framesToDecode,
+                    d->decodedSinceLog,
                     d->masterClockValid ? "audio" : "wall", d->masterClock,
                     d->masterClockUnusable ? -1 : 0);
+            d->decodedSinceLog = 0;
         }
     }
 
@@ -517,15 +556,15 @@ static bool ffmpegVideoDecoderOpen(VideoDecoder* decoder, const char* url) {
         return false;
     }
 
-    // Scaling down is not about the decode cost (H.264 has to be decoded at full
-    // size) but about what happens afterwards: the surface upload and the game's draw
-    // of that surface touch width*height pixels.
+    // Deliberately native size by default. Scaling down does not reduce the H.264
+    // decode cost, and the game positions the video by what the file says it is, so a
+    // smaller surface is drawn too small and cropped. BUTTERSCOTCH_VIDEO_SCALE is there
+    // for anyone who wants to trade the framing for a cheaper upload and draw.
     d->srcWidth = d->videoCodecCtx->width;
     d->srcHeight = d->videoCodecCtx->height;
     {
         const char* scaleEnv = getenv("BUTTERSCOTCH_VIDEO_SCALE");
-        long maxWidth = scaleEnv != nullptr ? strtol(scaleEnv, nullptr, 10) : 0;
-        if (maxWidth <= 0) maxWidth = VIDEO_DEFAULT_MAX_WIDTH;
+        long maxWidth = scaleEnv != nullptr ? strtol(scaleEnv, nullptr, 10) : VIDEO_DEFAULT_MAX_WIDTH;
         d->width = d->srcWidth;
         d->height = d->srcHeight;
         if (maxWidth > 0 && d->srcWidth > maxWidth) {

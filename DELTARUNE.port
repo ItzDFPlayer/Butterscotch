@@ -1,0 +1,73 @@
+#!/bin/sh
+# Standalone Ports Script Template
+
+# main configuration :
+GameName="DELTARUNE"
+GameDir="DELTARUNE"
+GameExecutable="butterscotch"
+GameDataFile="data.win"
+
+# additional configuration
+KillAudioserver=1
+PerformanceMode=1
+
+export SDL_HIDE_BATTERY=1
+
+# ---------------------------------------------------------------------------
+# Butterscotch settings.
+#
+# Everything below is listed at its built-in default, so this file changes
+# nothing as it stands; it is here to be edited. Flags read as "1 = on,
+# 0 or unset = off".
+# ---------------------------------------------------------------------------
+
+# Texture cache (MB). 48 is what the build picks on a 128 MB device, and the
+# room working set is allowed to grow to the maximum. Raise the max to stop a
+# heavy room (Cyber World, TV cutscenes) from evicting pages every frame:
+# the cache can go to 88 at the risk of running out of memory.
+export BUTTERSCOTCH_TEXTURE_MB=48
+export BUTTERSCOTCH_TEXTURE_MAX_MB=64
+
+# Debug switches, all off by default:
+#   NO_STRIPS    decode whole texture pages instead of strips
+#   NO_CULL      draw sprites/tiles that are off-screen too
+#   NO_PREFETCH  do not decode a room's pages when entering it
+export BUTTERSCOTCH_NO_STRIPS=0
+export BUTTERSCOTCH_NO_CULL=0
+export BUTTERSCOTCH_NO_PREFETCH=0
+
+# Progress bars while texture pages are prepared (off by default: the pass
+# usually finishes before anything would be drawn).
+export BUTTERSCOTCH_LOADING_BAR=0
+export BUTTERSCOTCH_BAKE_PROGRESS_BAR=0
+
+# Start with the fps/memory overlay and/or adaptive frame skipping enabled.
+export BUTTERSCOTCH_PERF_OVERLAY=0
+export BUTTERSCOTCH_FRAMESKIP=0
+
+# Buttons (GML key codes, as printed in the log next to each key press).
+# Here: L2 = Tab (9), R2 = Backspace (8), Select = right Ctrl (17), F9 = 120.
+export BUTTERSCOTCH_OVERLAY_KEY=9
+export BUTTERSCOTCH_FRAMESKIP_KEY=8
+export BUTTERSCOTCH_CAPTURE_KEY=120
+
+# Log every key press. Off keeps the log short: the first press of each
+# distinct key is always recorded, which is enough to identify a button.
+export BUTTERSCOTCH_LOG_KEYS=0
+
+# One line a second from the video decoder (clock it follows, frame it shows,
+# frames due). Set to 1 when a cutscene plays but the picture does not move.
+export BUTTERSCOTCH_LOG_VIDEO=0
+
+# Cutscene video. Leave the scale at 0: the game places the video using the size the
+# file reports, so a downscaled surface is drawn small and cropped. Set the thread
+# count to 2 to nearly halve 720p decode time (costs a few MB of memory).
+export BUTTERSCOTCH_VIDEO_SCALE=0
+export BUTTERSCOTCH_VIDEO_THREADS=1
+
+# specific to this port :
+Arguments="--renderer software --perf-log perf.log --log-file session.log $GameDataFile"
+# Arguments="--renderer software $GameDataFile"
+
+# running command line:
+/mnt/SDCARD/Emu/PORTS/launch_standalone.sh "$GameName" "$GameDir" "$GameExecutable" "$Arguments" "$GameDataFile" "$KillAudioserver" "$PerformanceMode"
