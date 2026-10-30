@@ -126,6 +126,21 @@ static bool envFlagSet(const char* name) {
     return value != nullptr && value[0] != '\0' && value[0] != '0';
 }
 
+// A GML key code from an environment variable, or `fallback` when unset. Handhelds
+// deliver their buttons as keyboard events with per-unit key choices, so the toggle
+// keys are configurable rather than hardcoded.
+static int envKeyCode(const char* name, int fallback) {
+    const char* value = getenv(name);
+    if (value == nullptr || value[0] == '\0') return fallback;
+
+    int key = atoi(value);
+    if (key <= 0 || key >= GML_KEY_COUNT) {
+        logWarn("Ignoring %s='%s': expected a GML key code from 1 to 255\n", name, value);
+        return fallback;
+    }
+    return key;
+}
+
 // Start + shoulder on a mapped pad. On the handheld the physical buttons arrive as
 // keyboard events instead (no gamecontrollerdb.txt in the port folder, so nothing
 // is ever mapped and the pad path stays dead), so the same combo is also accepted
@@ -1520,12 +1535,15 @@ int loop(CommandLineArgs args, const char *argv0) {
         const Room* prefetchLastRoom = nullptr;
 
         // Runtime toggles: Start+L2 shows the fps/memory overlay, Start+R2 enables
-        // adaptive frame skipping. F7/F8 do the same on a keyboard. Both can also be
+        // adaptive frame skipping. F7/F8 do the same on a keyboard, and so does a
+        // single key on the handheld (Tab / right Ctrl by default, overridable with
+        // BUTTERSCOTCH_OVERLAY_KEY / BUTTERSCOTCH_FRAMESKIP_KEY). Both can also be
         // turned on from the launcher with BUTTERSCOTCH_PERF_OVERLAY=1 /
-        // BUTTERSCOTCH_FRAMESKIP=1, which is the only way in when the port folder has
-        // no gamecontrollerdb.txt and therefore no pad buttons to combine.
+        // BUTTERSCOTCH_FRAMESKIP=1.
         bool showPerfOverlay = envFlagSet("BUTTERSCOTCH_PERF_OVERLAY");
         bool frameSkipEnabled = envFlagSet("BUTTERSCOTCH_FRAMESKIP");
+        const int32_t overlayToggleKey = envKeyCode("BUTTERSCOTCH_OVERLAY_KEY", VK_TAB);
+        const int32_t frameSkipToggleKey = envKeyCode("BUTTERSCOTCH_FRAMESKIP_KEY", VK_CONTROL);
         bool captureRequested = false;
         bool traceRequested = false;
         // Set when this iteration deliberately draws nothing (adaptive frame skip).
@@ -1737,12 +1755,14 @@ int loop(CommandLineArgs args, const char *argv0) {
                 // Start + L2 / Start + R2 toggles and the F9 capture request. These sit
                 // after the step because input recordings are injected just before it.
                 if (startPlusShoulder(runner, GP_SHOULDERLB, VK_PAGEUP) ||
-                    RunnerKeyboard_checkPressed(runner->keyboard, VK_F7)) {
+                    RunnerKeyboard_checkPressed(runner->keyboard, VK_F7) ||
+                    RunnerKeyboard_checkPressed(runner->keyboard, overlayToggleKey)) {
                     showPerfOverlay = !showPerfOverlay;
                     logInfo("Overlay: %s\n", showPerfOverlay ? "on" : "off");
                 }
                 if (startPlusShoulder(runner, GP_SHOULDERRB, VK_PAGEDOWN) ||
-                    RunnerKeyboard_checkPressed(runner->keyboard, VK_F8)) {
+                    RunnerKeyboard_checkPressed(runner->keyboard, VK_F8) ||
+                    RunnerKeyboard_checkPressed(runner->keyboard, frameSkipToggleKey)) {
                     frameSkipEnabled = !frameSkipEnabled;
                     frameSkipRun = 0;
                     logInfo("Frame skip: %s\n", frameSkipEnabled ? "on" : "off");
