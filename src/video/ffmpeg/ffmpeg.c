@@ -245,8 +245,31 @@ static int32_t ffmpegVideoDecoderUpdate(VideoDecoder* decoder) {
 static void ffmpegVideoDecoderDraw(VideoDecoder* decoder, Runner* runner, int32_t surfaceId) {
     FfmpegVideoDecoder* d = (FfmpegVideoDecoder*) decoder->impl;
     if (d == nullptr || d->drawPixels == nullptr || runner->renderer == nullptr) return;
-    if (runner->renderer->vtable->surfaceUploadRgb555 == nullptr) return;
-    Renderer_surfaceUploadRgb555(runner->renderer, surfaceId, d->drawPixels, d->width, d->height, d->width);
+
+    if (runner->renderer->vtable->surfaceUploadRgb555 != nullptr) {
+        Renderer_surfaceUploadRgb555(runner->renderer, surfaceId, d->drawPixels, d->width, d->height, d->width);
+        return;
+    }
+
+    // Other renderers take RGBA8. Expanding is only worth doing on the frame that is
+    // actually drawn, so the scratch buffer lives here rather than in the decoder.
+    if (runner->renderer->vtable->surfaceUploadPixels != nullptr) {
+        size_t pixels = (size_t) d->width * (size_t) d->height;
+        uint8_t* rgba = (uint8_t*) safeMalloc(pixels * 4);
+        if (rgba == nullptr) return;
+        for (size_t i = 0; i < pixels; i++) {
+            uint16_t px = d->drawPixels[i];
+            uint8_t r = (uint8_t) (((px >> 10) & 0x1F) * 255 / 31);
+            uint8_t g = (uint8_t) (((px >> 5) & 0x1F) * 255 / 31);
+            uint8_t b = (uint8_t) ((px & 0x1F) * 255 / 31);
+            rgba[i * 4 + 0] = r;
+            rgba[i * 4 + 1] = g;
+            rgba[i * 4 + 2] = b;
+            rgba[i * 4 + 3] = 255;
+        }
+        Renderer_surfaceUploadPixels(runner->renderer, surfaceId, d->width, d->height, rgba);
+        free(rgba);
+    }
 }
 
 static bool ffmpegVideoDecoderIsRunning(VideoDecoder* decoder) {

@@ -1848,6 +1848,21 @@ int loop(CommandLineArgs args, const char *argv0) {
 
                 renderer->vtable->endGUI(renderer);
             }
+                // Debug capture: F9 writes the finished frame to a PNG next to the
+                // working directory and drops a marker in the log, so a rendering bug
+                // can be reported from a machine without any screen capture tooling
+                // (the software renderer has no GL readback).
+                if (gfx == SOFTWARE && RunnerKeyboard_checkPressed(runner->keyboard, VK_F9)) {
+                    char capturePath[256];
+                    snprintf(capturePath, sizeof(capturePath), "swshot_%05d.png", runner->frameCount);
+                    if (SWRenderer_captureFramebuffer(renderer, capturePath))
+                        logInfo("Capture: frame %d, room '%s' -> %s\n", runner->frameCount,
+                                (runner->currentRoom != nullptr && runner->currentRoom->name != nullptr)
+                                    ? runner->currentRoom->name : "?",
+                                capturePath);
+                    else
+                        logWarn("Capture: could not write %s\n", capturePath);
+                }
 
 #ifdef ENABLE_SCREENSHOTS
             // Capture screenshot if this frame matches a requested frame

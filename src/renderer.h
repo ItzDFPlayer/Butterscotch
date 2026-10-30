@@ -356,6 +356,12 @@ static inline bool Renderer_surfaceExists(Renderer* renderer, int32_t surfaceInd
     return renderer->vtable->surfaceExists(renderer, surfaceIndex);
 }
 
+static inline void Renderer_surfaceUploadPixels(Renderer* renderer, int32_t surfaceIndex, int32_t width, int32_t height, const uint8_t* rgba) {
+    if (renderer != nullptr && renderer->vtable != nullptr && renderer->vtable->surfaceUploadPixels != nullptr) {
+        renderer->vtable->surfaceUploadPixels(renderer, surfaceIndex, width, height, rgba);
+    }
+}
+
 static inline bool Renderer_surfaceUploadRgb555(Renderer* renderer, int32_t surfaceIndex, const uint16_t* pixels, int32_t width, int32_t height, int32_t pitch) {
     if (renderer->vtable->surfaceUploadRgb555 == nullptr) return false;
     return renderer->vtable->surfaceUploadRgb555(renderer, surfaceIndex, pixels, width, height, pitch);

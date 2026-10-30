@@ -41,4 +41,10 @@ uint32_t SWRenderer_estimateTexturePageBytes(Renderer* renderer, int32_t pageId)
 // demand. Prefetching such a page would defeat the memory saving.
 bool SWRenderer_pageIsSubPage(Renderer* renderer, int32_t pageId);
 
+// Writes the finished framebuffer to `path` as an RGBA PNG. Used by the debug
+// capture key so a bug can be reported without a screen grabber: the software
+// renderer has no GL readback path, so this is the only way to get the exact
+// pixels the game produced. Returns false when there is nothing to write.
+bool SWRenderer_captureFramebuffer(Renderer* renderer, const char* path);
+
 #endif//_SW_RENDERER_H

@@ -4,6 +4,7 @@
 #include <assert.h>
 #include "text_utils.h"
 #include "image/image_decoder.h"
+#include "stb_image_write.h"
 
 #include "sw_renderer_private.h"
 
@@ -276,6 +277,36 @@ bool SWRenderer_prefetchTexturePage(Renderer* renderer, int32_t pageId)
     if (SWRenderer_pageIsSubPage(renderer, pageId)) return true;
 
     return swrEnsureTextureIsLoaded(swr, (uint32_t) pageId);
+}
+
+bool SWRenderer_captureFramebuffer(Renderer* renderer, const char* path)
+{
+    if (renderer == nullptr || path == nullptr) return false;
+
+    SWRenderer* swr = (SWRenderer*) renderer;
+    if (swr->fb == nullptr || swr->width <= 0 || swr->height <= 0) return false;
+
+    int32_t w = swr->width, h = swr->height;
+    uint8_t* rgba = (uint8_t*) safeMalloc((size_t) w * (size_t) h * 4);
+    if (rgba == nullptr) return false;
+
+    for (int32_t y = 0; y < h; y++)
+    {
+        const uintpixel_t* row = &swr->fb[(size_t) y * swr->fbPitch];
+        uint8_t* out = rgba + (size_t) y * (size_t) w * 4;
+        for (int32_t x = 0; x < w; x++)
+        {
+            uintpixel_t px = row[x];
+            out[x * 4 + 0] = (uint8_t) (((px >> 10) & 0x1F) * 255 / 31);
+            out[x * 4 + 1] = (uint8_t) (((px >> 5) & 0x1F) * 255 / 31);
+            out[x * 4 + 2] = (uint8_t) ((px & 0x1F) * 255 / 31);
+            out[x * 4 + 3] = 255;
+        }
+    }
+
+    int ok = stbi_write_png(path, w, h, 4, rgba, w * 4);
+    free(rgba);
+    return ok != 0;
 }
 
 bool SWRenderer_pageIsSubPage(Renderer* renderer, int32_t pageId)

@@ -17,3 +17,7 @@ tools/miyoo-arm/.zig/
 tools/ffmpeg/ffmpeg-*/
 tools/ffmpeg/*.tar.xz
 tools/ffmpeg/arm/
+
+# Interactive bug-hunting session: copied saves, captures and logs
+playtest/
+run-game.sh
