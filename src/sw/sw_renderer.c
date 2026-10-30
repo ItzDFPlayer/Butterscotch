@@ -590,6 +590,14 @@ static void SWRenderer_gpuSetBlendEnable(Renderer* renderer, bool enable)
     (void)renderer; (void)enable;
 }
 
+// Every sprite and surface blit in this renderer samples the texture directly, so
+// interpolation is simply not something it can turn on: accept the call and keep the
+// nearest-pixel look, which is what GameMaker's default is anyway.
+static void SWRenderer_gpuSetTexFilter(Renderer* renderer, bool enable)
+{
+    (void)renderer; (void)enable;
+}
+
 static void SWRenderer_gpuSetAlphaTestEnable(Renderer* renderer, bool enable)
 {
     UNIMP();
@@ -1261,6 +1269,7 @@ Renderer* SWRenderer_create(void)
     swrVtable.gpuSetBlendMode          = SWRenderer_gpuSetBlendMode;
     swrVtable.gpuSetBlendModeExt       = SWRenderer_gpuSetBlendModeExt;
     swrVtable.gpuSetBlendEnable        = SWRenderer_gpuSetBlendEnable;
+    swrVtable.gpuSetTexFilter          = SWRenderer_gpuSetTexFilter;
     swrVtable.gpuSetAlphaTestEnable    = SWRenderer_gpuSetAlphaTestEnable;
     swrVtable.gpuSetAlphaTestRef       = SWRenderer_gpuSetAlphaTestRef;
     swrVtable.gpuSetColorWriteEnable   = SWRenderer_gpuSetColorWriteEnable;
