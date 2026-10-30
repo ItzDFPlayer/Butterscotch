@@ -120,6 +120,18 @@ static char* resolveExternalPath(MaAudioSystem* ma, Sound* sound) {
 
 // ===[ Vtable Implementations ]===
 
+void MaAudioSystem_resetState(MaAudioSystem* ma) {
+    memset(ma->instances, 0, sizeof(ma->instances));
+    ma->nextInstanceCounter = 0;
+
+    repeat(MAX_LISTENERS, i) {
+        ma_sound_group_init(&ma->engine, 0, NULL, &ma->listenerGroups[i]);
+        ma_sound_group_set_spatialization_enabled(&ma->listenerGroups[i], MA_FALSE);
+        ma_sound_group_set_volume(&ma->listenerGroups[i], 1.0f);
+        ma->listenerGains[i] = 1.0f;
+    }
+}
+
 static void maInit(AudioSystem* audio, DataWin* dataWin, FileSystem* fileSystem) {
     MaAudioSystem* ma = (MaAudioSystem*) audio;
     arrput(ma->base.audioGroups, dataWin);
@@ -147,15 +159,7 @@ static void maInit(AudioSystem* audio, DataWin* dataWin, FileSystem* fileSystem)
         return;
     }
 
-    memset(ma->instances, 0, sizeof(ma->instances));
-    ma->nextInstanceCounter = 0;
-
-    repeat(MAX_LISTENERS, i) {
-        ma_sound_group_init(&ma->engine, 0, NULL, &ma->listenerGroups[i]);
-        ma_sound_group_set_spatialization_enabled(&ma->listenerGroups[i], MA_FALSE);
-        ma_sound_group_set_volume(&ma->listenerGroups[i], 1.0f);
-        ma->listenerGains[i] = 1.0f;
-    }
+    MaAudioSystem_resetState(ma);
 
     logInfo("Audio: miniaudio engine initialized\n");
 }
@@ -995,9 +999,8 @@ static AudioSystemVtable maAudioSystemVtable;
 
 // ===[ Lifecycle ]===
 
-MaAudioSystem* MaAudioSystem_create(DataWin* dataWin) {
-    MaAudioSystem* ma = (MaAudioSystem *)safeCalloc(1, sizeof(MaAudioSystem));
-    ma->base.dw = dataWin;
+static void maSetupVtable(void) {
+    if (maAudioSystemVtable.init != nullptr) return; // already populated
     maAudioSystemVtable.init = maInit;
     maAudioSystemVtable.destroy = maDestroy;
     maAudioSystemVtable.update = maUpdate;
@@ -1029,6 +1032,19 @@ MaAudioSystem* MaAudioSystem_create(DataWin* dataWin) {
     maAudioSystemVtable.createStream = maCreateStream;
     maAudioSystemVtable.destroyStream = maDestroyStream;
     maAudioSystemVtable.playEncoded = maPlayEncoded;
+}
+
+MaAudioSystem* MaAudioSystem_create(DataWin* dataWin) {
+    MaAudioSystem* ma = (MaAudioSystem *)safeCalloc(1, sizeof(MaAudioSystem));
+    ma->base.dw = dataWin;
+    maSetupVtable();
     ma->base.vtable = &maAudioSystemVtable;
     return ma;
+}
+
+const AudioSystemVtable* MaAudioSystem_vtable(void) {
+    // Populates on first use: overlay backends (SDL 1.2) inherit this vtable
+    // without going through MaAudioSystem_create.
+    maSetupVtable();
+    return &maAudioSystemVtable;
 }

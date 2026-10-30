@@ -106,6 +106,9 @@ SYSCFLAGS += $(GLFW3_CFLAGS)
 LIBS += $(GLFW3_LIBS)
 DEFINES += $(DEFINE)USE_GLFW3
 ENABLE_GLAD := 1
+ifdef ENABLE_GLES
+DISABLE_SW_RENDERER := 1
+endif
 endif
 ifeq ($(BACKEND),glfw2)
 GLFW2_CFLAGS := $(shell $(PKG_CONFIG) $(PKG_CONFIG_FLAGS) --cflags libglfw)
@@ -114,6 +117,9 @@ SYSCFLAGS += $(GLFW2_CFLAGS)
 LIBS += $(GLFW2_LIBS)
 DEFINES += $(DEFINE)USE_GLFW2
 ENABLE_GLAD := 1
+ifdef ENABLE_GLES
+DISABLE_SW_RENDERER := 1
+endif
 endif
 ifeq ($(BACKEND),sdl1)
 SDL1_CFLAGS := $(shell $(PKG_CONFIG) $(PKG_CONFIG_FLAGS) --cflags sdl)
@@ -208,6 +214,13 @@ DEFINES += $(DEFINE)ENABLE_NOOP_RENDERER
 endif
 endif
 
+ifndef DISABLE_SW_RENDERER
+DEFINES += -DENABLE_SW_RENDERER
+SRCS += $(wildcard src/sw/*.c)
+HEADERS += $(wildcard src/sw/*.h)
+INCLUDES += -Isrc/sw
+endif
+
 ifdef DISABLE_WAD14
 ifdef DISABLE_WAD16
 ifdef DISABLE_WAD17
@@ -223,6 +236,7 @@ endif
 else
 ifdef DISABLE_LEGACY_GL
 ifdef DISABLE_MODERN_GL
+ifdef DISABLE_SW_RENDERER
 $(error must enable at least 1 renderer)
 endif
 endif
@@ -233,6 +247,18 @@ INCLUDES += $(INC)src/audio/miniaudio $(INC)vendor/miniaudio
 DEFINES += $(DEFINE)USE_MINIAUDIO
 SRCS += $(wildcard src/audio/miniaudio/*.c)
 HEADERS += $(wildcard src/audio/miniaudio/*.h)
+ifneq ($(OS),Windows)
+LIBS += -pthread
+endif
+endif
+ifeq ($(AUDIO_BACKEND),sdl1)
+ifneq ($(BACKEND),sdl1)
+$(error AUDIO_BACKEND=sdl1 requires BACKEND=sdl1)
+endif
+INCLUDES += $(INCLUDE)src/audio/sdl1 $(INCLUDE)src/audio/miniaudio $(INCLUDE)vendor/miniaudio
+DEFINES += $(DEFINE)USE_SDL1_AUDIO
+SRCS += $(wildcard src/audio/sdl1/*.c) $(wildcard src/audio/miniaudio/*.c)
+HEADERS += $(wildcard src/audio/sdl1/*.h) $(wildcard src/audio/miniaudio/*.h)
 ifneq ($(OS),Windows)
 LIBS += -pthread
 endif

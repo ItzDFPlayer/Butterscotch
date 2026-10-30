@@ -317,7 +317,7 @@ void platformInitFunctions(Runner *runner) {
 
 static SDL_Surface* nextFb = NULL;
 
-void Runner_setNextFrame(uint32_t* framebuffer, int width, int height) {
+void platformSetNextFramebuffer(uint32_t* framebuffer, int width, int height) {
     if (nextFb) {
         SDL_FreeSurface(nextFb);
         nextFb = NULL;
@@ -327,12 +327,12 @@ void Runner_setNextFrame(uint32_t* framebuffer, int width, int height) {
         framebuffer,
         width,
         height,
-        32,
-        width * 4,
-        0x00ff0000, // Rmask
-        0x0000ff00, // Gmask
-        0x000000ff, // Bmask
-        0x00000000  // Amask
+        16,
+        width * 2,
+        0x7C00, // Rmask
+        0x03E0, // Gmask
+        0x001F, // Bmask
+        0x0000  // Amask
     );
 }
 
@@ -362,6 +362,12 @@ void *platformGetProcAddress(const char *name) {
 #endif
 
 static int32_t SDLKeyToGml(int sdlkey) {
+    // miyoomini controls for undertale hacky wacky
+    switch (sdlkey) {
+        case SDLK_SPACE: return toupper('z');
+        case SDLK_LCTRL: return toupper('x');
+        case SDLK_LSHIFT: return toupper('c');
+    }
     // Letters and numbers are the same as GML
     if (sdlkey >= 'a' && sdlkey <= 'z') return toupper(sdlkey);
     if (sdlkey >= '0' && sdlkey <= '9') return sdlkey;
@@ -378,10 +384,10 @@ static int32_t SDLKeyToGml(int sdlkey) {
         case SDLK_RCTRL:     return VK_CONTROL;
         case SDLK_LALT:
         case SDLK_RALT:      return VK_ALT;
-        case SDLK_UP:        return VK_UP;
-        case SDLK_DOWN:      return VK_DOWN;
-        case SDLK_LEFT:      return VK_LEFT;
-        case SDLK_RIGHT:     return VK_RIGHT;
+case SDLK_KP8:        case SDLK_UP:        return VK_UP;
+case SDLK_KP5:case SDLK_KP2:        case SDLK_DOWN:      return VK_DOWN;
+case SDLK_KP4:        case SDLK_LEFT:      return VK_LEFT;
+case SDLK_KP6:        case SDLK_RIGHT:     return VK_RIGHT;
         case SDLK_F1:        return VK_F1;
         case SDLK_F2:        return VK_F2;
         case SDLK_F3:        return VK_F3;
