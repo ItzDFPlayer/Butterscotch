@@ -648,14 +648,55 @@ static void SWRenderer_drawSpritePart(Renderer* renderer, int32_t tpagIndex,
     }
 }
 
+// draw_sprite_pos(): the sprite's source rectangle mapped onto four arbitrary
+// corners. Chapter 3 draws its actors like this (one call per body part), so leaving
+// it unimplemented made characters vanish piece by piece.
 static void SWRenderer_drawSpritePos(Renderer* renderer, int32_t tpagIndex,
                                      float x1, float y1, float x2, float y2,
                                      float x3, float y3, float x4, float y4, float alpha)
 {
-    (void)renderer; (void)tpagIndex;
-    (void)x1; (void)y1; (void)x2; (void)y2;
-    (void)x3; (void)y3; (void)x4; (void)y4; (void)alpha;
-    UNIMP();
+    SWRenderer* swr = (SWRenderer*) renderer;
+    DataWin* dwin = renderer->dataWin;
+
+    if (tpagIndex < 0 || (uint32_t) tpagIndex >= dwin->tpag.count) return;
+
+    TexturePageItem* tpag = &dwin->tpag.items[tpagIndex];
+    int16_t pageId = tpag->texturePageId;
+    if (0 > pageId || swr->totalTextureCount <= (uint32_t) pageId) return;
+
+    // Same source rectangle remapping the other blits use.
+    int sx = tpag->sourceX;
+    int sy = tpag->sourceY;
+    int sw = tpag->targetWidth;
+    int sh = tpag->targetHeight;
+    if (tpag->sourceWidth != tpag->targetWidth) {
+        sx = sx * tpag->sourceWidth / tpag->targetWidth;
+        sw = sw * tpag->sourceWidth / tpag->targetWidth;
+    }
+    if (tpag->sourceHeight != tpag->targetHeight) {
+        sy = sy * tpag->sourceHeight / tpag->targetHeight;
+        sh = sh * tpag->sourceHeight / tpag->targetHeight;
+    }
+    if (sw <= 0 || sh <= 0) return;
+
+    if (!swrEnsureTextureRegion(swr, (uint32_t) pageId, sx, sy, sw, sh)) return;
+
+    SWTexture* texture = swr->textures[pageId];
+    if (texture == nullptr) return;
+
+    swrTransformPosIfNeeded(swr, &x1, &y1);
+    swrTransformPosIfNeeded(swr, &x2, &y2);
+    swrTransformPosIfNeeded(swr, &x3, &y3);
+    swrTransformPosIfNeeded(swr, &x4, &y4);
+
+    int alphaInt = swrIntAlpha(alpha);
+    const float u0 = (float) sx, v0 = (float) sy;
+    const float u1 = (float) (sx + sw), v1 = (float) sy;
+    const float u2 = (float) (sx + sw), v2 = (float) (sy + sh);
+    const float u3 = (float) sx, v3 = (float) (sy + sh);
+
+    swrDrawTexturedTriangle(renderer, texture, x1, y1, u0, v0, x2, y2, u1, v1, x3, y3, u2, v2, alphaInt);
+    swrDrawTexturedTriangle(renderer, texture, x1, y1, u0, v0, x3, y3, u2, v2, x4, y4, u3, v3, alphaInt);
 }
 
 static void SWRenderer_drawRectangle(Renderer* renderer, float x1, float y1, float x2, float y2,

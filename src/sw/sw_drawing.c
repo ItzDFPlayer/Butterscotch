@@ -1504,6 +1504,99 @@ void swrDrawTriangle(Renderer* renderer, float x1, float y1, float x2, float y2,
     );
 }
 
+// ===[ Textured triangles ]===
+//
+// draw_sprite_pos() maps a sprite onto four arbitrary corners (skewed, rotated and
+// scaled at once), which is how Deltarune Chapter 3 draws the actors' bodies: each
+// part is placed independently so the characters can lean and squash. Upstream
+// engines send this to the GPU as two triangles; here it is rasterised with the same
+// nearest-neighbour sampling the rest of the software renderer uses.
+//
+// Quality note: the interpolation is affine per triangle, not perspective correct.
+// For the flat, front-facing quads these games draw the difference is invisible.
+static void swrRasterTexturedTriangle(SWRenderer* swr, const SWTexture* texture,
+                                      float x0, float y0, float u0, float v0,
+                                      float x1, float y1, float u1, float v1,
+                                      float x2, float y2, float u2, float v2,
+                                      int srcalpha, int invalpha)
+{
+    // Screen-space bounding box, clipped to the render port.
+    float minXf = swrMin(x0, swrMin(x1, x2));
+    float maxXf = swrMax(x0, swrMax(x1, x2));
+    float minYf = swrMin(y0, swrMin(y1, y2));
+    float maxYf = swrMax(y0, swrMax(y1, y2));
+
+    int minX = swrMax(swr->portX, (int) floorf(minXf));
+    int maxX = swrMin(swr->maxX - 1, (int) ceilf(maxXf));
+    int minY = swrMax(swr->portY, (int) floorf(minYf));
+    int maxY = swrMin(swr->maxY - 1, (int) ceilf(maxYf));
+    if (minX > maxX || minY > maxY) return;
+
+    // Edge function for a clockwise triangle; flip the winding if it came in the
+    // other way round so both cases rasterise.
+    float area = (x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0);
+    if (area == 0.0f) return;
+    if (area < 0.0f) {
+        float tx = x1, ty = y1, tu = u1, tv = v1;
+        x1 = x2; y1 = y2; u1 = u2; v1 = v2;
+        x2 = tx; y2 = ty; u2 = tu; v2 = tv;
+        area = -area;
+    }
+    const float invArea = 1.0f / area;
+
+    const int texW = (int) texture->width;
+    const int texH = (int) texture->height;
+
+    for (int py = minY; py <= maxY; py++)
+    {
+        const float fy = (float) py + 0.5f;
+        uintpixel_t* line = &swr->fb[(size_t) py * swr->fbPitch];
+
+        for (int px = minX; px <= maxX; px++)
+        {
+            const float fx = (float) px + 0.5f;
+
+            float w0 = (x2 - x1) * (fy - y1) - (y2 - y1) * (fx - x1);
+            float w1 = (x0 - x2) * (fy - y2) - (y0 - y2) * (fx - x2);
+            float w2 = (x1 - x0) * (fy - y0) - (y1 - y0) * (fx - x0);
+            if (w0 < 0.0f || w1 < 0.0f || w2 < 0.0f) continue;
+
+            w0 *= invArea; w1 *= invArea; w2 *= invArea;
+            float u = u0 * w0 + u1 * w1 + u2 * w2;
+            float v = v0 * w0 + v1 * w1 + v2 * w2;
+
+            int tx = (int) u;
+            int ty = (int) v;
+            if (tx < 0) tx = 0; else if (tx >= texW) tx = texW - 1;
+            if (ty < 0) ty = 0; else if (ty >= texH) ty = texH - 1;
+
+            uintpixel_t texel = texture->buffer[(size_t) ty * texture->width + tx];
+            if (!opaque(texel)) continue;
+            alphaBlend(&line[px], texel, srcalpha, invalpha);
+        }
+    }
+}
+
+void swrDrawTexturedTriangle(Renderer* renderer, const SWTexture* texture,
+                             float x0, float y0, float u0, float v0,
+                             float x1, float y1, float u1, float v1,
+                             float x2, float y2, float u2, float v2,
+                             int alpha)
+{
+    SWRenderer* swr = (SWRenderer*) renderer;
+    if (texture == nullptr || texture->buffer == nullptr) return;
+
+    int srcalpha = swrCalcSrcAlpha(swr, alpha);
+    int invalpha = swrCalcDstAlpha(swr, alpha);
+    if (srcalpha == 0) return;
+
+    swrTraceDraw(swr, "texquad", texture, (int) u0, (int) v0, 0, 0,
+                 (int) x0, (int) y0, (int) x1, (int) y1, alpha, 0xFFFFFF);
+
+    swrRasterTexturedTriangle(swr, texture, x0, y0, u0, v0, x1, y1, u1, v1, x2, y2, u2, v2,
+                              srcalpha, invalpha);
+}
+
 void swrDrawText(SWRenderer* swr, const char* text, float x, float y, float xscale, float yscale, float angleDeg, int32_t color, float alpha, float lineSeparation)
 {
     Renderer* renderer = &swr->base;
