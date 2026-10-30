@@ -226,7 +226,13 @@ void platformSetWindowSize(int32_t width, int32_t height) {
     if (width <= 0 || height <= 0) return;
     fbWidth = width;
     fbHeight = height;
-    scr = SDL_SetVideoMode(width, height, 0, (gfx == SOFTWARE ? 0 : SDL_OPENGL) | SDL_RESIZABLE);
+    // 16bpp for the software renderer: the handheld's panel and our framebuffer are
+    // both RGB555, so the screen surface is then a straight copy target instead of
+    // something SDL has to convert per pixel. With 0 here the driver hands back a
+    // 32bpp shadow buffer, and every frame pays two full-frame conversions
+    // (555 -> 32 -> panel), which measured ~18 ms on the device.
+    scr = SDL_SetVideoMode(width, height, gfx == SOFTWARE ? 16 : 0,
+                           (gfx == SOFTWARE ? 0 : SDL_OPENGL) | SDL_RESIZABLE);
 }
 
 void platformGetMousePos(double *xPos, double *yPos) {
@@ -271,13 +277,14 @@ bool platformInit(int32_t reqW, int32_t reqH, const char *title, bool headless) 
     fbWidth = reqW;
     fbHeight = reqH;
     if(!headless) {
-        scr = SDL_SetVideoMode(fbWidth, fbHeight, 0, (gfx == SOFTWARE ? 0 : SDL_OPENGL) | SDL_RESIZABLE);
+        scr = SDL_SetVideoMode(fbWidth, fbHeight, gfx == SOFTWARE ? 16 : 0,
+                               (gfx == SOFTWARE ? 0 : SDL_OPENGL) | SDL_RESIZABLE);
         if (!scr && gfx == SOFTWARE) {
             SDL_Rect** modes = SDL_ListModes(NULL, SDL_FULLSCREEN);
             if (modes && modes != (SDL_Rect**) -1 && modes[0]) {
                 logWarn("%dx%d unavailable, falling back to %dx%d: %s\n",
                         reqW, reqH, modes[0]->w, modes[0]->h, SDL_GetError());
-                scr = SDL_SetVideoMode(modes[0]->w, modes[0]->h, 0, 0);
+                scr = SDL_SetVideoMode(modes[0]->w, modes[0]->h, 16, 0);
                 fbWidth = modes[0]->w;
                 fbHeight = modes[0]->h;
             }
