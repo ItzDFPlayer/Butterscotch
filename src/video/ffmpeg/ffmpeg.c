@@ -246,6 +246,10 @@ static bool ffmpegVideoDecoderSeekAhead(FfmpegVideoDecoder* d, double seconds) {
     if (d->durationSeconds > 0 && seekTo > d->durationSeconds - 0.2) {
         seekTo = d->durationSeconds > 0.2 ? d->durationSeconds - 0.2 : 0;
     }
+    // A jump that would not move forward is the end of the file in disguise: past the
+    // last keyframe every seek lands on that same keyframe again. Let the normal decode
+    // path run to eof instead, which is what reports the video as finished.
+    if (seekTo <= d->presentedSeconds + d->frameDurationSeconds) return false;
     int64_t ts = d->startPts + (int64_t) (seekTo / av_q2d(d->videoStream->time_base));
     if (avformat_seek_file(d->formatCtx, d->videoStreamIndex, INT64_MIN, ts, INT64_MAX, 0) < 0) {
         return false;
@@ -263,7 +267,10 @@ static bool ffmpegVideoDecoderSeekAhead(FfmpegVideoDecoder* d, double seconds) {
 // Walking from the keyframe to the exact time would cost a whole group of pictures,
 // which on this hardware is slower than simply playing and never getting there.
 static bool ffmpegVideoDecoderTakeSeekFrame(FfmpegVideoDecoder* d) {
-    if (!ffmpegVideoDecoderPullFrame(d)) return false;
+    if (!ffmpegVideoDecoderPullFrame(d)) {
+        if (d->eof && !d->loop) d->finished = true;
+        return false;
+    }
     bool shown = ffmpegVideoDecoderConvertFrame(d, d->videoFrame) == 0;
     av_frame_unref(d->videoFrame);
     if (shown) {
@@ -309,6 +316,15 @@ static int32_t ffmpegVideoDecoderUpdate(VideoDecoder* decoder) {
     int32_t framesToDecode;
     if (d->hasFrame && d->paused) {
         return VIDEO_FRAME_HELD;
+    }
+
+    // The clock has run past the end of the file. Say so instead of chasing it: the
+    // picture cannot advance any further, and the game is waiting for video_end to
+    // move on.
+    if (!d->loop && d->durationSeconds > 0 && targetSeconds >= d->durationSeconds) {
+        d->presentedSeconds = d->durationSeconds;
+        d->finished = true;
+        return VIDEO_FRAME_NONE;
     }
 
     // Too far behind to catch up by decoding: jump to where the clock is. Not again
