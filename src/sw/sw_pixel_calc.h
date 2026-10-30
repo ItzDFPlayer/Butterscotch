@@ -234,14 +234,18 @@ FORCE_INLINE void swrSetupBlendState(SWRenderer* swr)
     }
     else if (swr->blendSrcFactor == 0)
     {
-        // The blendMode enum is in charge. It is expressible as a factor pair for
-        // the two modes that matter, but only the general path can apply a colour
-        // write mask, so drop out of the legacy path when one is set.
+        // The blendMode enum is in charge. bm_normal and bm_add are weighted sums, so
+        // the legacy alphaBlend() path reproduces them exactly, but only when no colour
+        // write mask is set. bm_min, bm_max and bm_reverse_subtract are separate blend
+        // *operations* that no sum can express, so they always take the general path:
+        // treating them as a plain weighted sum is what paints Deltarune's overworld
+        // damage veil as a solid white screen instead of darkening the scene.
         bool maskActive = swr->writeMask != WRITE_MASK_ALL;
-        if (maskActive && (swr->blendMode == bm_normal || swr->blendMode == bm_add))
-            swr->pixelMode = SWR_PIXEL_GENERIC;
-        else
+        bool plainMode = (swr->blendMode == bm_normal || swr->blendMode == bm_add);
+        if (plainMode && !maskActive)
             swr->pixelMode = SWR_PIXEL_LEGACY;
+        else
+            swr->pixelMode = SWR_PIXEL_GENERIC;
     }
     else if (swr->blendSrcFactor == bm_inv_dest_alpha && swr->blendDstFactor == bm_dest_alpha)
         swr->pixelMode = SWR_PIXEL_SELECT;
@@ -306,8 +310,48 @@ FORCE_INLINE void swrBlitPixelEx(SWRenderer* swr, uintpixel_t* dstPtr, uintpixel
             int sf = swr->blendSrcFactor, df = swr->blendDstFactor;
             if (sf == 0)
             {
-                // A colour write mask with the plain blend modes: bm_normal and
-                // bm_add are both expressible as a factor pair.
+                // The blendMode enum is in charge. bm_normal and bm_add are weighted
+                // sums, which a factor pair expresses, but bm_min, bm_max and
+                // bm_reverse_subtract are separate blend *operations*: evaluated as a
+                // sum they replace the scene with the veil colour, which is why
+                // Deltarune's overworld damage overlay used to paint a solid white
+                // screen instead of darkening it. The source is weighted by the draw
+                // alpha so a half-transparent veil only partly clamps or darkens.
+                if (swr->blendMode == bm_max || swr->blendMode == bm_min ||
+                    swr->blendMode == bm_reverse_subtract)
+                {
+                    const int rw = (sr * srcAlpha) >> 8;
+                    const int gw = (sg * srcAlpha) >> 8;
+                    const int bw = (sb * srcAlpha) >> 8;
+                    int r, g, b;
+
+                    if (swr->blendMode == bm_max)
+                    {
+                        r = rw > dr ? rw : dr;
+                        g = gw > dg ? gw : dg;
+                        b = bw > db ? bw : db;
+                    }
+                    else if (swr->blendMode == bm_min)
+                    {
+                        r = rw < dr ? rw : dr;
+                        g = gw < dg ? gw : dg;
+                        b = bw < db ? bw : db;
+                    }
+                    else  // bm_reverse_subtract
+                    {
+                        r = dr - rw; if (r < 0) r = 0;
+                        g = dg - gw; if (g < 0) g = 0;
+                        b = db - bw; if (b < 0) b = 0;
+                    }
+
+                    // Neither operation can make a transparent destination opaque,
+                    // so the alpha bit only follows an opaque source.
+                    bool opaqueOut = (dst & SWR_ALPHA_BIT) != 0 || srcAlpha > 127;
+                    result = (uintpixel_t) ((opaqueOut ? SWR_ALPHA_BIT : 0) |
+                                            (r << 10) | (g << 5) | b);
+                    break;
+                }
+
                 if (swr->blendMode == bm_add) { sf = bm_src_alpha; df = bm_one; }
                 else { sf = bm_src_alpha; df = bm_inv_src_alpha; }
             }

@@ -59,6 +59,12 @@ export BUTTERSCOTCH_LOG_KEYS=0
 # frames due). Set to 1 when a cutscene plays but the picture does not move.
 export BUTTERSCOTCH_LOG_VIDEO=0
 
+# Print the draw state (blend enable, blend mode and factors, colour write mask,
+# resulting pixel mode) every time it changes. Only transitions are logged, so a
+# room costs a handful of lines. Set to 1 when an effect that should darken or
+# tint the screen instead paints it a flat colour.
+export BUTTERSCOTCH_LOG_BLEND=0
+
 # Print, once a second, the draws that actually spent the frame's draw time:
 # kind, texture-page item, total ms, us per draw, pixels per draw. This is how a
 # heavy room gets diagnosed - pixel counts alone do not say whether the frame is

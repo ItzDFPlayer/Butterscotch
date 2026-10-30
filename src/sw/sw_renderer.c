@@ -1005,6 +1005,44 @@ static void SWRenderer_clearScreen(Renderer* renderer, uint32_t color, float alp
     }
 }
 
+// ====[ Blend state logging ]====
+//
+// BUTTERSCOTCH_LOG_BLEND=1 prints the draw state the moment it changes, which is how
+// an effect that "renders wrong" gets identified: Deltarune's overworld damage veil
+// is built out of gpu_set_blendmode[_ext] plus gpu_set_colorwriteenable, and which
+// of those the game actually asks for decides whether the veil should darken the
+// scene (subtract), replace it (blendenable false) or leave it alone (alpha-only
+// write mask). Only state transitions are logged, so a full room is a handful of
+// lines rather than one per draw.
+static void swrLogBlendState(SWRenderer* swr, const char* source)
+{
+    static int enabled = -1;
+    static unsigned lastKey = 0;
+    static bool haveLast = false;
+
+    if (enabled < 0) {
+        const char* env = getenv("BUTTERSCOTCH_LOG_BLEND");
+        enabled = (env != nullptr && env[0] != '\0' && env[0] != '0') ? 1 : 0;
+        if (enabled) logInfo("Blend log enabled\n");
+    }
+    if (!enabled) return;
+
+    unsigned key = ((unsigned) (swr->blendEnabled ? 1u : 0u) << 24)
+                 | ((unsigned) (swr->blendMode & 0xF) << 20)
+                 | ((unsigned) (swr->blendSrcFactor & 0xF) << 16)
+                 | ((unsigned) (swr->blendDstFactor & 0xF) << 12)
+                 | ((unsigned) (swr->writeMask & 0xF) << 8)
+                 | ((unsigned) (swr->pixelMode & 0xF) << 4);
+    if (haveLast && key == lastKey) return;
+    haveLast = true;
+    lastKey = key;
+
+    logInfo("Blend %-14s enabled=%d mode=%d src=%d dst=%d mask=%X -> pixelMode=%d %s\n",
+            source, swr->blendEnabled ? 1 : 0, swr->blendMode,
+            swr->blendSrcFactor, swr->blendDstFactor, swr->writeMask, swr->pixelMode,
+            swr->drawingToSurface ? "surface" : "screen");
+}
+
 static void SWRenderer_gpuSetBlendMode(Renderer* renderer, int32_t mode)
 {
     SWRenderer* swr = (SWRenderer*) renderer;
@@ -1014,6 +1052,7 @@ static void SWRenderer_gpuSetBlendMode(Renderer* renderer, int32_t mode)
     swr->blendSrcFactor = 0;
     swr->blendDstFactor = 0;
     swrSetupBlendState(swr);
+    swrLogBlendState(swr, "set_blendmode");
 }
 
 static void SWRenderer_gpuSetBlendModeExt(Renderer* renderer, int32_t sfactor, int32_t dfactor, int32_t sfactor_alpha, int32_t dfactor_alpha)
@@ -1027,6 +1066,7 @@ static void SWRenderer_gpuSetBlendModeExt(Renderer* renderer, int32_t sfactor, i
     swr->blendSrcFactor = sfactor;
     swr->blendDstFactor = dfactor;
     swrSetupBlendState(swr);
+    swrLogBlendState(swr, "set_blendmode_ext");
 }
 
 static void SWRenderer_gpuSetBlendEnable(Renderer* renderer, bool enable)
@@ -1034,6 +1074,7 @@ static void SWRenderer_gpuSetBlendEnable(Renderer* renderer, bool enable)
     SWRenderer* swr = (SWRenderer*) renderer;
     swr->blendEnabled = enable;
     swrSetupBlendState(swr);
+    swrLogBlendState(swr, "set_blendenable");
 }
 
 // Every sprite and surface blit in this renderer samples the texture directly, so
@@ -1067,6 +1108,7 @@ static void SWRenderer_gpuSetColorWriteEnable(Renderer* renderer, bool red, bool
         (alpha ? WRITE_MASK_ALPHA : 0);
     // The mask alone puts us on the general blitter; see swrSetupBlendState.
     swrSetupBlendState(swr);
+    swrLogBlendState(swr, "set_colorwrite");
 
     if (!swr->drawingToSurface) {
         // Nothing else to do: the draw routines apply the mask per pixel.
