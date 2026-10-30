@@ -1527,11 +1527,14 @@ static int32_t SWRenderer_createSpriteFromSurface(Renderer* renderer, int32_t su
         
         // in-bounds
         for (; sx < srcTex->width && ix < w; sx++, ix++)
-#if PIXEL_SIZE == 8
+            // Copy the pixel as it is, transparency bit included. Forcing the
+            // transparent bit on (which is what this used to do) turns every
+            // sprite_create_from_surface() into an opaque rectangle: Deltarune's
+            // obj_battleLayerHighlight renders one tile layer into a surface cleared
+            // with draw_clear_alpha(c_white, 0) and draws the result over the room, so
+            // the whole screen came out white instead of the layer's magenta border
+            // tiles sitting on the scene.
             dstline[ix] = srcline[ix];
-#else
-            dstline[ix] = srcline[ix] | TRANSPARENT_MASK;
-#endif
 
         // right edge
         for (; ix < w; ix++)

@@ -24,3 +24,6 @@ run-game.sh
 
 # Save files written by run-dev.sh
 /saves/
+
+# Frame captures written by BUTTERSCOTCH_CAPTURE_FRAME / F9
+swshot_*.png

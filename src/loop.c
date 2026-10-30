@@ -1550,6 +1550,15 @@ int loop(CommandLineArgs args, const char *argv0) {
         // Debug capture (PNG + one draw trace line per draw). F9 by default; on the
         // handheld, where F9 does not exist, point this at a real button.
         const int32_t captureKey = envKeyCode("BUTTERSCOTCH_CAPTURE_KEY", VK_F9);
+        // Same capture, but at a fixed frame, so a headless run can produce a PNG of a
+        // specific moment (a room that only appears late, an effect that is hard to
+        // reach by hand). Parse errors simply disable it.
+        int32_t captureFrame = -1;
+        {
+            const char* captureFrameEnv = getenv("BUTTERSCOTCH_CAPTURE_FRAME");
+            if (captureFrameEnv != nullptr && captureFrameEnv[0] != '\0')
+                captureFrame = (int32_t) strtol(captureFrameEnv, nullptr, 10);
+        }
         // "FRAME SKIP ON/OFF" shown in the top right corner for a moment after the
         // toggle, because otherwise there is no feedback on a screen without a console.
         char skipBanner[24] = {0};
@@ -1781,7 +1790,8 @@ int loop(CommandLineArgs args, const char *argv0) {
                     skipBannerUntil = nowNanos() + 1500000000ull;
                     logInfo("Frame skip: %s\n", frameSkipEnabled ? "on" : "off");
                 }
-                if (gfx == SOFTWARE && RunnerKeyboard_checkPressed(runner->keyboard, captureKey)) {
+                if (gfx == SOFTWARE && (RunnerKeyboard_checkPressed(runner->keyboard, captureKey) ||
+                                        (captureFrame >= 0 && runner->frameCount == captureFrame))) {
                     captureRequested = true;
                     traceRequested = true;
                 }
