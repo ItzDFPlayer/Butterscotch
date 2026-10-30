@@ -1341,11 +1341,21 @@ static bool SWRenderer_surfaceUploadRgb555(Renderer* renderer, int32_t surfaceID
     int32_t w = swrMin(width, (int32_t) tex->width);
     int32_t h = swrMin(height, (int32_t) tex->height);
 
+    // Four pixels per step: a 720p frame is 1.8 MB of this, and a per-pixel loop made
+    // the upload a visible share of a cutscene frame.
     for (int32_t y = 0; y < h; y++)
     {
         const uint16_t* src = pixels + (size_t) y * (size_t) pitch;
         uintpixel_t* dst = &tex->buffer[(size_t) y * tex->width];
-        for (int32_t x = 0; x < w; x++)
+        int32_t x = 0;
+        for (; x + 4 <= w; x += 4)
+        {
+            uint64_t four;
+            memcpy(&four, src + x, sizeof(four));
+            four |= 0x8000800080008000ull;
+            memcpy(dst + x, &four, sizeof(four));
+        }
+        for (; x < w; x++)
             dst[x] = (uintpixel_t) (src[x] | 0x8000);
     }
 

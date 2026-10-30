@@ -56,6 +56,10 @@ static char* ffmpegFileUrl(const char* path) {
 #define VIDEO_AUDIO_CHANNELS 2
 #define VIDEO_AUDIO_SAMPLE_RATE 48000
 
+// The screen is 640x480, so decoding a 720p cutscene into a 1280x720 surface only
+// makes the upload and the game's draw four times more expensive than they need to be.
+#define VIDEO_DEFAULT_MAX_WIDTH 640
+
 #define VIDEO_FALLBACK_FPS 30.0
 #define VIDEO_MIN_FPS 1.0
 #define VIDEO_MAX_FPS 1000.0
@@ -63,6 +67,11 @@ static char* ffmpegFileUrl(const char* path) {
 // decoder burns its whole frame budget here, so the cap keeps a hitch bounded.
 #define VIDEO_MAX_CATCHUP_FRAMES 12
 #define VIDEO_MASTER_JUMP_SECONDS 0.25
+// How far the picture may fall behind before the decoder jumps forward instead of
+// decoding every frame. A 1280x720 H.264 cutscene decodes at ~14 fps on the A7, so a
+// 24 fps video can never keep up: without a jump the picture drifts further behind for
+// the whole cutscene and the video ends long after the game thinks it did.
+#define VIDEO_SEEK_AHEAD_SECONDS 0.5
 // How many updates in a row a master (audio) clock may report the same position
 // before it is treated as unusable. A backend that cannot report the position of a
 // streamed sound returns 0 forever, and trusting that froze the first frame while
@@ -77,8 +86,10 @@ typedef struct {
     AVFrame* videoFrame;
     struct SwsContext* swsCtx;
     uint16_t* drawPixels; // width * height packed RGB555, the renderer's format
-    int32_t width;
+    int32_t width;                // Output (surface) size, possibly scaled down.
     int32_t height;
+    int32_t srcWidth;             // Size the video is coded at.
+    int32_t srcHeight;
     int64_t startPts;
 
     double frameDurationSeconds; // Nominal frame period of the source video.
@@ -97,6 +108,7 @@ typedef struct {
     bool hasMasterSample;
     bool masterClockValid;        // The audio track is driving playback.
     bool masterClockUnusable;     // Never trust this video's audio clock again.
+    bool seekPending;             // A jump is waiting for its first frame to decode.
 
     double durationSeconds;
     bool hasVideo;
@@ -179,6 +191,7 @@ static int32_t ffmpegVideoDecoderConvertFrame(FfmpegVideoDecoder* d, AVFrame* fr
         d->presentedSeconds = d->hasFrame ? d->presentedSeconds + d->frameDurationSeconds : 0;
     }
     d->hasFrame = true;
+    d->seekPending = false;
     return 0;
 }
 
@@ -208,6 +221,25 @@ static bool ffmpegVideoDecoderRewind(FfmpegVideoDecoder* d) {
     d->eof = false;
     d->presentedSeconds = 0;
     d->hasFrame = false;
+    d->seekPending = false;
+    return true;
+}
+
+// Jumps to `seconds` instead of decoding every frame in between. Used when the device
+// cannot decode the video in real time: on this hardware a 720p cutscene decodes at
+// about 14 fps, so without the jump the picture falls further behind every second and
+// the cutscene overruns its own length.
+static bool ffmpegVideoDecoderSeekAhead(FfmpegVideoDecoder* d, double seconds) {
+    if (d->videoStream == nullptr) return false;
+    int64_t ts = d->startPts + (int64_t) (seconds / av_q2d(d->videoStream->time_base));
+    if (avformat_seek_file(d->formatCtx, d->videoStreamIndex, INT64_MIN, ts, INT64_MAX, 0) < 0) {
+        return false;
+    }
+    avcodec_flush_buffers(d->videoCodecCtx);
+    d->eof = false;
+    d->nextDueSeconds = seconds;
+    d->stalledMasterTicks = 0;
+    d->seekPending = true;
     return true;
 }
 
@@ -248,6 +280,17 @@ static int32_t ffmpegVideoDecoderUpdate(VideoDecoder* decoder) {
     if (d->hasFrame && d->paused) {
         return VIDEO_FRAME_HELD;
     }
+
+    // Too far behind to catch up by decoding: jump to where the clock is. Not again
+    // until the frame that jump landed on has been decoded, or a slow keyframe would
+    // make every following update jump again.
+    if (d->hasFrame && !d->seekPending && targetSeconds > d->presentedSeconds + VIDEO_SEEK_AHEAD_SECONDS) {
+        double drift = targetSeconds - d->presentedSeconds;
+        if (ffmpegVideoDecoderSeekAhead(d, targetSeconds)) {
+            logInfo("Video: %.2fs behind, jumped to %.2fs\n", drift, targetSeconds);
+        }
+    }
+
     framesToDecode = ffmpegVideoDecoderFramesDue(d, targetSeconds);
 
     if (logVideo) {
@@ -396,6 +439,8 @@ static void ffmpegVideoDecoderClose(VideoDecoder* decoder) {
     d->videoStreamIndex = -1;
     d->width = 0;
     d->height = 0;
+    d->srcWidth = 0;
+    d->srcHeight = 0;
     d->startPts = 0;
     d->frameDurationSeconds = 1.0 / VIDEO_FALLBACK_FPS;
     d->presentedSeconds = 0;
@@ -412,6 +457,7 @@ static void ffmpegVideoDecoderClose(VideoDecoder* decoder) {
     d->hasMasterSample = false;
     d->masterClockValid = false;
     d->masterClockUnusable = false;
+    d->seekPending = false;
     d->durationSeconds = 0;
     d->hasVideo = false;
     d->eof = false;
@@ -444,9 +490,16 @@ static bool ffmpegVideoDecoderOpen(VideoDecoder* decoder, const char* url) {
         d->videoCodecCtx = avcodec_alloc_context3(videoCodec);
         if (d->videoCodecCtx != nullptr) {
             if (avcodec_parameters_to_context(d->videoCodecCtx, d->videoStream->codecpar) == 0) {
-                // Extra threads cost memory (128 MB on the Miyoo) and the handheld
-                // decodes one frame at a time anyway; there is nothing to overlap.
-                d->videoCodecCtx->thread_count = 1;
+                // Extra threads cost memory (128 MB on the Miyoo), so this stays at one
+                // by default; BUTTERSCOTCH_VIDEO_THREADS=2 halves the decode time of a
+                // 720p cutscene on the dual-core A7 if there is memory to spare.
+                {
+                    const char* threadsEnv = getenv("BUTTERSCOTCH_VIDEO_THREADS");
+                    long threads = threadsEnv != nullptr ? strtol(threadsEnv, nullptr, 10) : 0;
+                    if (threads <= 0) threads = 1;
+                    if (threads > 4) threads = 4;
+                    d->videoCodecCtx->thread_count = (int) threads;
+                }
                 if (avcodec_open2(d->videoCodecCtx, videoCodec, nullptr) == 0) d->hasVideo = true;
             }
             if (!d->hasVideo) {
@@ -464,8 +517,27 @@ static bool ffmpegVideoDecoderOpen(VideoDecoder* decoder, const char* url) {
         return false;
     }
 
-    d->width = d->videoCodecCtx->width;
-    d->height = d->videoCodecCtx->height;
+    // Scaling down is not about the decode cost (H.264 has to be decoded at full
+    // size) but about what happens afterwards: the surface upload and the game's draw
+    // of that surface touch width*height pixels.
+    d->srcWidth = d->videoCodecCtx->width;
+    d->srcHeight = d->videoCodecCtx->height;
+    {
+        const char* scaleEnv = getenv("BUTTERSCOTCH_VIDEO_SCALE");
+        long maxWidth = scaleEnv != nullptr ? strtol(scaleEnv, nullptr, 10) : 0;
+        if (maxWidth <= 0) maxWidth = VIDEO_DEFAULT_MAX_WIDTH;
+        d->width = d->srcWidth;
+        d->height = d->srcHeight;
+        if (maxWidth > 0 && d->srcWidth > maxWidth) {
+            d->width = (int32_t) maxWidth;
+            d->height = (int32_t) (((long) d->srcHeight * maxWidth + d->srcWidth / 2) / d->srcWidth);
+        }
+        // An odd dimension breaks the 2-byte row assumption of the upload.
+        d->width &= ~1;
+        d->height &= ~1;
+        if (d->width <= 0) d->width = 2;
+        if (d->height <= 0) d->height = 2;
+    }
     d->startPts = d->videoStream->start_time == AV_NOPTS_VALUE ? 0 : d->videoStream->start_time;
     if (d->durationSeconds <= 0 && d->videoStream->duration > 0) {
         d->durationSeconds = (double) d->videoStream->duration * av_q2d(d->videoStream->time_base);
@@ -476,7 +548,7 @@ static bool ffmpegVideoDecoderOpen(VideoDecoder* decoder, const char* url) {
         ffmpegVideoDecoderClose(decoder);
         return false;
     }
-    d->swsCtx = sws_getContext(d->width, d->height, d->videoCodecCtx->pix_fmt,
+    d->swsCtx = sws_getContext(d->srcWidth, d->srcHeight, d->videoCodecCtx->pix_fmt,
                                d->width, d->height, AV_PIX_FMT_RGB555LE,
                                SWS_FAST_BILINEAR, nullptr, nullptr, nullptr);
     d->drawPixels = (uint16_t*) safeMalloc((size_t) d->width * (size_t) d->height * sizeof(uint16_t));
@@ -511,8 +583,10 @@ static bool ffmpegVideoDecoderOpen(VideoDecoder* decoder, const char* url) {
     d->hasMasterSample = false;
     d->masterClockValid = false;
     d->masterClockUnusable = false;
+    d->seekPending = false;
 
-    logInfo("Video: opened '%s' (%dx%d, %.1fs, %.2f fps)\n", url, d->width, d->height, d->durationSeconds, fps);
+    logInfo("Video: opened '%s' (%dx%d -> %dx%d, %.1fs, %.2f fps)\n", url,
+            d->srcWidth, d->srcHeight, d->width, d->height, d->durationSeconds, fps);
     return true;
 }
 
