@@ -126,6 +126,16 @@ static bool envFlagSet(const char* name) {
     return value != nullptr && value[0] != '\0' && value[0] != '0';
 }
 
+// Start + shoulder on a mapped pad. On the handheld the physical buttons arrive as
+// keyboard events instead (no gamecontrollerdb.txt in the port folder, so nothing
+// is ever mapped and the pad path stays dead), so the same combo is also accepted
+// from the keyboard: Enter is Start, PageUp / PageDown are L2 / R2 there.
+static bool startPlusShoulder(Runner* runner, int32_t shoulder, int32_t keyboardKey) {
+    if (gamepadStartComboPressed(runner, shoulder)) return true;
+    if (!RunnerKeyboard_check(runner->keyboard, VK_ENTER)) return false;
+    return RunnerKeyboard_checkPressed(runner->keyboard, keyboardKey);
+}
+
 static size_t get_used_memory(void) {
 #if defined(__linux__)
     {
@@ -1521,6 +1531,7 @@ int loop(CommandLineArgs args, const char *argv0) {
         // Set when this iteration deliberately draws nothing (adaptive frame skip).
         bool skippingDraw = false;
         int frameSkipRun = 0;
+        double lastDrawWorkMs = 0.0;
         uint32_t overlayFrames = 0;
         uint32_t overlaySkipped = 0;
         uint64_t overlayWindowStart = nowNanos();
@@ -1725,12 +1736,12 @@ int loop(CommandLineArgs args, const char *argv0) {
             if (shouldStep) {
                 // Start + L2 / Start + R2 toggles and the F9 capture request. These sit
                 // after the step because input recordings are injected just before it.
-                if (gamepadStartComboPressed(runner, GP_SHOULDERLB) ||
+                if (startPlusShoulder(runner, GP_SHOULDERLB, VK_PAGEUP) ||
                     RunnerKeyboard_checkPressed(runner->keyboard, VK_F7)) {
                     showPerfOverlay = !showPerfOverlay;
                     logInfo("Overlay: %s\n", showPerfOverlay ? "on" : "off");
                 }
-                if (gamepadStartComboPressed(runner, GP_SHOULDERRB) ||
+                if (startPlusShoulder(runner, GP_SHOULDERRB, VK_PAGEDOWN) ||
                     RunnerKeyboard_checkPressed(runner->keyboard, VK_F8)) {
                     frameSkipEnabled = !frameSkipEnabled;
                     frameSkipRun = 0;
@@ -1823,9 +1834,12 @@ int loop(CommandLineArgs args, const char *argv0) {
                 // a row at most, so the screen still updates several times a second.
                 skippingDraw = false;
                 if (frameSkipEnabled && runner->currentRoom != nullptr && runner->currentRoom->speed > 0) {
+                    // Judge by what the last frame we actually drew cost, not by the
+                    // paced wall time: a paced frame always reports the room period and
+                    // a skipped one reports only its step, so neither says whether it is
+                    // the drawing that overruns the budget.
                     double periodMs = 1000.0 / (double) runner->currentRoom->speed;
-                    double prevFrameMs = (double) runner->deltaTime / 1000.0;
-                    if (prevFrameMs > periodMs * 1.1 && frameSkipRun < 3 && !captureRequested) {
+                    if (lastDrawWorkMs > periodMs * 1.1 && frameSkipRun < 3 && !captureRequested) {
                         skippingDraw = true;
                         frameSkipRun++;
                         overlaySkipped++;
@@ -1918,6 +1932,9 @@ int loop(CommandLineArgs args, const char *argv0) {
                 renderer->vtable->endFrameEnd(renderer);
                 Runner_drawGUI(runner, fbWidth, fbHeight, gameW, gameH);
                 perfAfterDraw = nowNanos();
+                // What this frame cost end to end; the next frame's skip decision uses
+                // it, and it stays put while consecutive frames are skipped.
+                lastDrawWorkMs = (double) (perfAfterDraw - frameStartTime) / 1000000.0;
 
                 if (showDebugOverlay && renderer->vtable->drawTextUI != nullptr) {
                     renderer->vtable->beginGUI(renderer, fbWidth, fbHeight, 0, 0, fbWidth, fbHeight, RENDER_TARGET_HOST_FRAMEBUFFER);

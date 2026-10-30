@@ -39,6 +39,8 @@ typedef struct {
 } GamepadMapping;
 
 static GamepadMapping joystickMappings[MAX_GAMEPADS];
+// Slots whose "pad present but unmapped" line was already logged.
+static bool unmappedReported[MAX_GAMEPADS];
 
 static void parseMappingField(GamepadMapping* mapping, const char* key, const char* val) {
     int gml_btn = -1;
@@ -524,6 +526,12 @@ bool platformHandleEvents(void) {
                         slot->axisValue[a] = val / 32767.0f;
                     }
                 }
+            } else if (!unmappedReported[slotIdx]) {
+                // Worth one line: with no entry the runner reads no buttons from this
+                // pad at all, which quietly disables every gamepad shortcut.
+                unmappedReported[slotIdx] = true;
+                logInfo("Gamepad: slot %d ('%s') has no gamecontrollerdb entry, its buttons are ignored\n",
+                        slotIdx, slot->description);
             }
 
             for (int btn = 0; GP_BUTTON_COUNT > btn; btn++) {
@@ -552,7 +560,23 @@ bool platformHandleEvents(void) {
                 }
                 // During playback, suppress real keyboard input
                 if (InputRecording_isPlaybackActive(globalInputRecording)) break;
-                RunnerKeyboard_onKeyDown(g_runner->keyboard, SDLKeyToGml(e.key.keysym.sym));
+                {
+                    int32_t gmlKey = SDLKeyToGml(e.key.keysym.sym);
+                    // BUTTERSCOTCH_LOG_KEYS=1 prints what each physical button sends.
+                    // Handhelds deliver their pad as keyboard events, and without this
+                    // there is no way to find the key behind e.g. L2.
+                    static int logKeys = -1;
+                    if (logKeys < 0) {
+                        const char* env = getenv("BUTTERSCOTCH_LOG_KEYS");
+                        logKeys = (env != nullptr && env[0] != '\0' && env[0] != '0') ? 1 : 0;
+                    }
+                    if (logKeys) {
+                        logInfo("Key down: sdl='%s' (%d) -> gml %d\n",
+                                SDL_GetKeyName(e.key.keysym.sym),
+                                (int) e.key.keysym.sym, gmlKey);
+                    }
+                    RunnerKeyboard_onKeyDown(g_runner->keyboard, gmlKey);
+                }
                 if (e.key.keysym.unicode != 0)
                     RunnerKeyboard_onCharacter(g_runner->keyboard, e.key.keysym.unicode);
                 break;

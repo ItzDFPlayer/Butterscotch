@@ -106,6 +106,7 @@ static void printUsage(const char *argv0) {
         "  Environment:\n"
         "    BUTTERSCOTCH_PERF_OVERLAY=1           - Start with the fps/memory overlay on\n"
         "    BUTTERSCOTCH_FRAMESKIP=1              - Start with adaptive frame skipping on\n"
+        "    BUTTERSCOTCH_LOG_KEYS=1               - Log what key each physical button sends\n"
 #endif
         "    --disable-log-colours                  - Disable colours for warning, error, and debug logs\n"
         "    --disable-log-colors                   - Same as --disable-log-colours, but different spelling\n"
