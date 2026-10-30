@@ -1544,6 +1544,10 @@ int loop(CommandLineArgs args, const char *argv0) {
         bool frameSkipEnabled = envFlagSet("BUTTERSCOTCH_FRAMESKIP");
         const int32_t overlayToggleKey = envKeyCode("BUTTERSCOTCH_OVERLAY_KEY", VK_TAB);
         const int32_t frameSkipToggleKey = envKeyCode("BUTTERSCOTCH_FRAMESKIP_KEY", VK_BACKSPACE);
+        // "FRAME SKIP ON/OFF" shown in the top right corner for a moment after the
+        // toggle, because otherwise there is no feedback on a screen without a console.
+        char skipBanner[24] = {0};
+        uint64_t skipBannerUntil = 0;
         bool captureRequested = false;
         bool traceRequested = false;
         // Set when this iteration deliberately draws nothing (adaptive frame skip).
@@ -1765,6 +1769,9 @@ int loop(CommandLineArgs args, const char *argv0) {
                     RunnerKeyboard_checkPressed(runner->keyboard, frameSkipToggleKey)) {
                     frameSkipEnabled = !frameSkipEnabled;
                     frameSkipRun = 0;
+                    snprintf(skipBanner, sizeof(skipBanner), "FRAME SKIP %s",
+                             frameSkipEnabled ? "ON" : "OFF");
+                    skipBannerUntil = nowNanos() + 1500000000ull;
                     logInfo("Frame skip: %s\n", frameSkipEnabled ? "on" : "off");
                 }
                 if (gfx == SOFTWARE && RunnerKeyboard_checkPressed(runner->keyboard, VK_F9)) {
@@ -2001,6 +2008,11 @@ int loop(CommandLineArgs args, const char *argv0) {
                              overlayFps, overlayFrameMs, (double) overlayMemBytes / (1024.0 * 1024.0),
                              (int) overlaySkipped, frameSkipEnabled ? "ON" : "OFF");
                     SWRenderer_drawOverlayText(renderer, 4, 4, 0.28f, overlayText);
+                }
+
+                // Transient confirmation of the frame-skip toggle, top right corner.
+                if (gfx == SOFTWARE && skipBanner[0] != '\0' && nowNanos() < skipBannerUntil) {
+                    SWRenderer_drawOverlayTextRight(renderer, 4, 4, 0.28f, skipBanner);
                 }
 
                 if (tracingThisFrame && gfx == SOFTWARE) {

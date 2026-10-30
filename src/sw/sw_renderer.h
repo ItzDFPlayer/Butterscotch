@@ -51,6 +51,11 @@ void SWRenderer_setDrawTrace(Renderer* renderer, bool enabled);
 // at 640x480. Only the software renderer has this, which is where it is needed.
 void SWRenderer_drawOverlayText(Renderer* renderer, int x, int y, float scale, const char* text);
 
+// Same text, but laid out so that every line ends `marginRight` pixels from the right
+// edge of the framebuffer. Used for the short-lived "FRAME SKIP ON/OFF" banner.
+void SWRenderer_drawOverlayTextRight(Renderer* renderer, int marginRight, int y, float scale,
+                                     const char* text);
+
 // Writes the finished framebuffer to `path` as an RGBA PNG. Used by the debug
 // capture key so a bug can be reported without a screen grabber: the software
 // renderer has no GL readback path, so this is the only way to get the exact

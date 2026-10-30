@@ -2,6 +2,7 @@
 // the software renderer needs them.
 
 #include <math.h>
+#include <string.h>
 
 #include "debug_font/debug_font.h"
 #include "sw_renderer.h"
@@ -74,5 +75,48 @@ void SWRenderer_drawOverlayText(Renderer* renderer, int x, int y, float scale, c
             swrOverlayGlyph(swr, g, penX, top, scale, color, shadowDx, shadowDy);
             penX += (float) g->xadvance * scale;
         }
+    }
+}
+
+// Width of one line of overlay text, so a line can be placed by its right edge.
+static float swrOverlayLineWidth(const char* text, float scale)
+{
+    float width = 0.0f;
+    for (const char* c = text; *c != '\0' && *c != '\n'; c++)
+    {
+        if ((unsigned char) *c < DEBUGFONT_FIRST_CP || (unsigned char) *c > DEBUGFONT_LAST_CP) continue;
+        width += (float) debugFontGlyphs[(unsigned char) *c - DEBUGFONT_FIRST_CP].xadvance * scale;
+    }
+    return width;
+}
+
+void SWRenderer_drawOverlayTextRight(Renderer* renderer, int marginRight, int y, float scale,
+                                     const char* text)
+{
+    if (renderer == nullptr || text == nullptr) return;
+
+    SWRenderer* swr = (SWRenderer*) renderer;
+    if (swr->fb == nullptr || scale <= 0.0f) return;
+
+    // One line at a time, each placed by its own right edge.
+    float top = (float) y;
+
+    for (const char* line = text; *line != '\0'; )
+    {
+        const char* end = line;
+        while (*end != '\0' && *end != '\n') end++;
+
+        char buf[128];
+        size_t length = (size_t) (end - line);
+        if (length >= sizeof(buf)) length = sizeof(buf) - 1;
+        memcpy(buf, line, length);
+        buf[length] = '\0';
+
+        float lineWidth = swrOverlayLineWidth(buf, scale);
+        int x = (int) ((float) swr->width - (float) marginRight - lineWidth);
+        SWRenderer_drawOverlayText(renderer, x, (int) top, scale, buf);
+
+        top += (float) DEBUGFONT_LINE_HEIGHT * scale;
+        line = (*end == '\n') ? end + 1 : end;
     }
 }
