@@ -1535,15 +1535,15 @@ int loop(CommandLineArgs args, const char *argv0) {
         const Room* prefetchLastRoom = nullptr;
 
         // Runtime toggles: Start+L2 shows the fps/memory overlay, Start+R2 enables
-        // adaptive frame skipping. F7/F8 do the same on a keyboard, and so does a
-        // single key on the handheld (Tab / right Ctrl by default, overridable with
-        // BUTTERSCOTCH_OVERLAY_KEY / BUTTERSCOTCH_FRAMESKIP_KEY). Both can also be
-        // turned on from the launcher with BUTTERSCOTCH_PERF_OVERLAY=1 /
-        // BUTTERSCOTCH_FRAMESKIP=1.
+        // adaptive frame skipping. On the handheld, where the buttons arrive as
+        // keyboard events, Tab (L2) and Backspace (R2) do the same, and F7/F8 work on
+        // a desktop keyboard. Both keys are overridable with BUTTERSCOTCH_OVERLAY_KEY /
+        // BUTTERSCOTCH_FRAMESKIP_KEY, and both states can be forced on at boot with
+        // BUTTERSCOTCH_PERF_OVERLAY=1 / BUTTERSCOTCH_FRAMESKIP=1.
         bool showPerfOverlay = envFlagSet("BUTTERSCOTCH_PERF_OVERLAY");
         bool frameSkipEnabled = envFlagSet("BUTTERSCOTCH_FRAMESKIP");
         const int32_t overlayToggleKey = envKeyCode("BUTTERSCOTCH_OVERLAY_KEY", VK_TAB);
-        const int32_t frameSkipToggleKey = envKeyCode("BUTTERSCOTCH_FRAMESKIP_KEY", VK_CONTROL);
+        const int32_t frameSkipToggleKey = envKeyCode("BUTTERSCOTCH_FRAMESKIP_KEY", VK_BACKSPACE);
         bool captureRequested = false;
         bool traceRequested = false;
         // Set when this iteration deliberately draws nothing (adaptive frame skip).

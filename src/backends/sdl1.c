@@ -578,9 +578,13 @@ bool platformHandleEvents(void) {
                     bool seen = sym < SDL_LOG_KEY_SYMS ? loggedSyms[sym] : false;
                     if (logEveryKey || !seen) {
                         if (sym < SDL_LOG_KEY_SYMS) loggedSyms[sym] = true;
-                        logInfo("Key down: sdl='%s' (%d) -> gml %d\n",
+                        // The scancode is what identifies a button that SDL knows no
+                        // keysym for - those arrive as 'unknown key' with sym 0.
+                        logInfo("Key down: sdl='%s' (%d) scancode %d -> gml %d\n",
                                 SDL_GetKeyName(e.key.keysym.sym),
-                                (int) e.key.keysym.sym, gmlKey);
+                                (int) e.key.keysym.sym,
+                                (int) e.key.keysym.scancode,
+                                gmlKey);
                     }
                     RunnerKeyboard_onKeyDown(g_runner->keyboard, gmlKey);
                 }
