@@ -21,3 +21,6 @@ tools/ffmpeg/arm/
 # Interactive bug-hunting session: copied saves, captures and logs
 playtest/
 run-game.sh
+
+# Save files written by run-dev.sh
+/saves/
