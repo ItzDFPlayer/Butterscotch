@@ -2,25 +2,32 @@
 # Runs Butterscotch on this machine with the software renderer, keeping every
 # save file inside ./saves/ in this repository.
 #
-#   ./run-dev.sh                       # auto-detect the game data
-#   ./run-dev.sh /path/to/data.win     # use a specific data.win (or its folder)
+# By default it starts the FULL game (the launcher data.win at the top of the
+# DELTARUNE folder), so the chapter select, the chapter hand-off and every
+# chapter's rendering are testable here. Pass a path to run one chapter direct:
+#
+#   ./run-dev.sh                                            # full game
+#   ./run-dev.sh .../chapter2_windows/data.win             # just chapter 2
+#   ./run-dev.sh .../DELTARUNE                             # folder, uses its data.win
 #   ./run-dev.sh --headless --exit-at-frame 60
+#   ./run-dev.sh --perf-log perf.log
 #
 # Anything after the data.win is passed straight to the runner, so the usual
-# debugging flags (--perf-log, --log-file, --trace-frame, --disassemble) work:
-#
-#   ./run-dev.sh --renderer software --perf-log perf.log --log-file session.log
+# debugging flags (--perf-log, --log-file, --trace-frame, --disassemble) work.
 #
 # Environment:
 #   BUTTERSCOTCH_BIN      runner binary to use instead of the built one
-#   DELTARUNE_DIR         folder holding the chapter's data.win
+#   DELTARUNE_DIR         DELTARUNE install folder (the one holding data.win)
 #   BUTTERSCOTCH_SAVES    save folder (default: ./saves next to this script)
+#   BUTTERSCOTCH_LOG      set to 0 to stop writing session.log (default: on)
 #   STEAM_LIBRARY         Steam library root to search for DELTARUNE
 #   BUTTERSCOTCH_EXTRA_ARGS   extra runner arguments, word-split
 #
-# The save folder is the point of this script: without --save-folder the runner
-# saves next to data.win, which for a Steam install is a read-only place to keep
-# progress and mixes this port's saves with the real game's.
+# Two things make this convenient for bug hunting: --save-folder below keeps
+# progress out of the Steam install (the runner otherwise saves next to
+# data.win, mixing this port's saves with the real game's), and a log file is
+# written by default so a crash still leaves its last lines (log.c flushes per
+# line, so the file survives a segfault).
 
 set -eu
 
@@ -77,9 +84,10 @@ if [ -z "$DATA" ]; then
     elif [ -f "$ROOT/data.win" ]; then
         DATA=$ROOT/data.win
     else
-        # Steam install, chapter 2 first: it is what this port is tested
-        # against, and the later chapters' fullscreen effects are the ones that
-        # still need work.
+        # Steam install. The data.win at the top of the DELTARUNE folder is the
+        # full-game launcher: it shows the chapter select and then hands control
+        # to <chapter>_windows/data.win through game_change. Falling back to a
+        # chapter keeps the script usable from a partial copy of the game.
         for lib in \
             "${STEAM_LIBRARY:-}" \
             "$HOME/.steam/steam" \
@@ -90,8 +98,12 @@ if [ -z "$DATA" ]; then
         do
             [ -n "$lib" ] || continue
             [ -d "$lib" ] || continue
+            if [ -f "$lib/steamapps/common/DELTARUNE/data.win" ]; then
+                DATA=$lib/steamapps/common/DELTARUNE/data.win
+                break
+            fi
             for chapter in chapter2_windows chapter1_windows chapter3_windows \
-                           chapter4_windows chapter5_windows DELTARUNE
+                           chapter4_windows chapter5_windows
             do
                 if [ -f "$lib/steamapps/common/DELTARUNE/$chapter/data.win" ]; then
                     DATA=$lib/steamapps/common/DELTARUNE/$chapter/data.win
@@ -115,19 +127,35 @@ mkdir -p "$SAVES"
 # ./saves relative to wherever it ends up.
 SAVES=$(cd "$SAVES" && pwd)
 
+# --- log file --------------------------------------------------------------
+
+# Log by default: a crash then leaves its last lines on disk instead of only in
+# a scrolling terminal. Skipped if the caller already asked for a log, and
+# turned off with BUTTERSCOTCH_LOG=0.
+LOG_ARGS=
+LOG_PATH=$ROOT/session.log
+if [ "${BUTTERSCOTCH_LOG:-1}" != "0" ]; then
+    case " $* ${BUTTERSCOTCH_EXTRA_ARGS:-} " in
+        *" --log-file "*) ;;
+        *) LOG_ARGS="--log-file $LOG_PATH" ;;
+    esac
+fi
+
 echo "runner:   $BIN"
 echo "game:     $DATA"
 echo "saves:    $SAVES"
 echo "renderer: software"
+[ -n "$LOG_ARGS" ] && echo "log:      $LOG_PATH"
 
 # --- run -------------------------------------------------------------------
 
-# Word-split on purpose: BUTTERSCOTCH_EXTRA_ARGS holds several arguments. set -f
-# stops a '*' in them from being expanded against the current directory.
+# Word-split on purpose: BUTTERSCOTCH_EXTRA_ARGS and LOG_ARGS hold several
+# arguments. set -f stops a '*' in them from being expanded against the cwd.
 set -f
 # shellcheck disable=SC2086
 exec "$BIN" "$DATA" \
     --renderer software \
     --save-folder "$SAVES" \
+    $LOG_ARGS \
     ${BUTTERSCOTCH_EXTRA_ARGS:-} \
     "$@"
