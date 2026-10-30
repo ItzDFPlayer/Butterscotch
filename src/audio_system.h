@@ -17,6 +17,13 @@ typedef struct {
     float totalTime;
 } AudioGroupGain;
 
+// Voice ids handed back by playSound() are offset by this much so they can never be
+// confused with a sound asset index. Every backend uses the same value; it lives
+// here so callers (video playback, for one) do not have to include a backend header.
+#ifndef SOUND_INSTANCE_ID_BASE
+#define SOUND_INSTANCE_ID_BASE 100000
+#endif
+
 // ===[ AudioSystem Vtable ]===
 
 typedef struct AudioSystem AudioSystem;

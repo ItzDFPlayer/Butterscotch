@@ -9,7 +9,7 @@
 #include "real_type.h"
 #include "renderer.h"
 #include "runner.h"
-#include "video/video_player.h"
+#include "video/video.h"
 #include "runner_gamepad.h"
 #include "matrix_math.h"
 #include "utils.h"
@@ -13040,39 +13040,38 @@ static RValue builtin_video_close(VMContext* ctx, MAYBE_UNUSED RValue* args, MAY
 }
 
 static RValue builtin_video_get_status(VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) {
-    return RValue_makeReal((GMLReal) VideoPlayer_status(Runner_getVideo(ctx->runner)));
+    return RValue_makeReal((GMLReal) Runner_videoStatus(ctx->runner));
 }
 
 static RValue builtin_video_get_format(VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) {
-    return RValue_makeReal((GMLReal) VideoPlayer_format(Runner_getVideo(ctx->runner)));
+    return RValue_makeReal((GMLReal) Runner_videoFormat(ctx->runner));
 }
 
 static RValue builtin_video_get_position(VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) {
-    return RValue_makeReal((GMLReal) VideoPlayer_position(Runner_getVideo(ctx->runner)));
+    return RValue_makeReal((GMLReal) Runner_videoPosition(ctx->runner));
 }
 
 static RValue builtin_video_get_duration(VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) {
-    return RValue_makeReal((GMLReal) VideoPlayer_duration(Runner_getVideo(ctx->runner)));
+    return RValue_makeReal((GMLReal) Runner_videoDuration(ctx->runner));
 }
 
 static RValue builtin_video_set_volume(VMContext* ctx, RValue* args, MAYBE_UNUSED int32_t argCount) {
-    float volume = (float) RValue_toReal(args[0]);
-    VideoPlayer_setVolume(Runner_getVideo(ctx->runner), volume);
+    Runner_videoSetVolume(ctx->runner, RValue_toReal(args[0]));
     return RValue_makeReal(0.0);
 }
 
 static RValue builtin_video_enable_loop(VMContext* ctx, RValue* args, MAYBE_UNUSED int32_t argCount) {
-    VideoPlayer_setLoop(Runner_getVideo(ctx->runner), RValue_toBool(args[0]));
+    Runner_videoSetLoop(ctx->runner, RValue_toBool(args[0]));
     return RValue_makeReal(0.0);
 }
 
 static RValue builtin_video_pause(VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) {
-    VideoPlayer_pause(Runner_getVideo(ctx->runner));
+    Runner_videoPause(ctx->runner);
     return RValue_makeReal(0.0);
 }
 
 static RValue builtin_video_resume(VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) {
-    VideoPlayer_resume(Runner_getVideo(ctx->runner));
+    Runner_videoResume(ctx->runner);
     return RValue_makeReal(0.0);
 }
 
@@ -13081,7 +13080,7 @@ static RValue builtin_video_resume(VMContext* ctx, MAYBE_UNUSED RValue* args, MA
 static RValue builtin_video_draw(VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) {
     Runner* runner = ctx->runner;
     GMLArray* out = GMLArray_create(ctx->dataWin->gen8.wadVersion, 3);
-    GMLArray_set(out, 0, RValue_makeReal((GMLReal) VideoPlayer_status(Runner_getVideo(runner))));
+    GMLArray_set(out, 0, RValue_makeReal((GMLReal) Runner_videoStatus(runner)));
     GMLArray_set(out, 1, RValue_makeReal((GMLReal) Runner_videoSurface(runner)));
     GMLArray_set(out, 2, RValue_makeReal(-1.0)); // no separate chroma surface: we decode to RGB
     return RValue_makeArray(out);
@@ -20193,6 +20192,38 @@ static RValue builtin_texturegroup_get_status(MAYBE_UNUSED VMContext* ctx, MAYBE
     return RValue_makeInt32(3);
 }
 
+// ===[ Texture streaming ]===
+//
+// GameMaker lets a game ask for texture pages ahead of time and then poll until
+// they are resident (texturegroup_get_textures / texture_prefetch /
+// texture_is_ready, plus sprite_prefetch). Chapter 3 uses this for the "tenna"
+// texture group. Our renderer loads a page the first time it is drawn and keeps it
+// in an LRU, so from the game's point of view every texture is ready immediately:
+// describing them as not ready is what made the game skip drawing parts of the
+// scene while it waited for a page that would never report itself loaded.
+//
+// We do not know the group table (the WAD's texture group chunk is not parsed), so
+// the group listing is empty and the prefetch calls are no-ops. Nothing breaks
+// because drawing a page loads it on demand anyway.
+static RValue builtin_texturegroup_get_textures(VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) {
+    return RValue_makeArray(GMLArray_create(ctx->dataWin->gen8.wadVersion, 0));
+}
+
+static RValue builtin_texture_prefetch(VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) {
+    (void) ctx;
+    return RValue_makeReal(1.0);
+}
+
+static RValue builtin_texture_is_ready(VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) {
+    (void) ctx;
+    return RValue_makeReal(1.0);
+}
+
+static RValue builtin_sprite_prefetch(VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) {
+    (void) ctx;
+    return RValue_makeReal(1.0);
+}
+
 static RValue builtin_texture_set_stage(VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) {
     int32_t TextureSlot = (int32_t) RValue_toReal(args[0]);
     int32_t texID = (int32_t) RValue_toInt32(args[1]);
@@ -25848,6 +25879,10 @@ void VMBuiltins_registerAll(VMContext* ctx) {
     VM_registerBuiltin(ctx, "texture_get_uvs", builtin_texture_get_uvs);
     VM_registerBuiltin(ctx, "texturegroup_get_status", builtin_texturegroup_get_status);
     VM_registerBuiltin(ctx, "texture_set_stage", builtin_texture_set_stage);
+    VM_registerBuiltin(ctx, "texturegroup_get_textures", builtin_texturegroup_get_textures);
+    VM_registerBuiltin(ctx, "texture_prefetch", builtin_texture_prefetch);
+    VM_registerBuiltin(ctx, "texture_is_ready", builtin_texture_is_ready);
+    VM_registerBuiltin(ctx, "sprite_prefetch", builtin_sprite_prefetch);
     VM_registerBuiltin(ctx, "sprite_get_info", builtin_sprite_get_info);
     VM_registerBuiltin(ctx, "video_open", builtin_video_open);
     VM_registerBuiltin(ctx, "video_start", builtin_video_start);

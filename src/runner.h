@@ -681,11 +681,21 @@ struct Runner {
     AudioSystem* audioSystem;
     // The single open video (GameMaker's video_* API is global). NULL when nothing
     // is playing. Owned by the runner.
-    struct VideoPlayer* video;
+    struct VideoDecoder* video;
     // Surface the current video frame is uploaded into, -1 when none.
     int32_t videoSurface;
     // Set when a video starts or ends, so the async event fires exactly once.
     int32_t videoPendingEvent;
+    // The video's audio track, extracted to a WAV at open and streamed from there.
+    // -1 when the video has no audio (or the build has no video at all).
+    int32_t videoAudioStream;
+    int32_t videoAudioInstance;
+    // video_set_volume() value, applied to the voice.
+    double videoVolume;
+    // True between video_start and video_end; the decoder can finish before we have
+    // told the game about it.
+    bool videoRunning;
+    bool videoLoop;
     Room* currentRoom;
     struct PhysicsEngine* physics;
     struct PhysicsResources* physicsResources; // shared fixture/joint handles; allocated lazily
@@ -936,7 +946,7 @@ void Runner_step(Runner* runner);
 void Runner_handlePendingRoomChange(Runner* runner);
 // ===[ Video ]===
 // The GameMaker video_* API is global, so at most one video is open at a time.
-struct VideoPlayer;
+struct VideoDecoder;
 // Opens a video asset (path relative to data.win). Returns false when this build
 // cannot decode video or the file is unusable.
 bool Runner_videoOpen(Runner* runner, const char* path);
@@ -946,7 +956,17 @@ void Runner_videoClose(Runner* runner);
 void Runner_videoUpdate(Runner* runner, float deltaSeconds);
 // Surface holding the current frame, or -1 (no video, paused or finished).
 int32_t Runner_videoSurface(Runner* runner);
-struct VideoPlayer* Runner_getVideo(Runner* runner);
+struct VideoDecoder* Runner_getVideo(Runner* runner);
+// GameMaker status codes: 0 = playing, 1 = paused, 2 = finished or no video.
+int32_t Runner_videoStatus(Runner* runner);
+// 0 = RGB frames, 1 = YUV. We always decode to the renderer's RGB format.
+int32_t Runner_videoFormat(Runner* runner);
+double Runner_videoPosition(Runner* runner);
+double Runner_videoDuration(Runner* runner);
+void Runner_videoSetVolume(Runner* runner, double volume);
+void Runner_videoSetLoop(Runner* runner, bool loop);
+void Runner_videoPause(Runner* runner);
+void Runner_videoResume(Runner* runner);
 void Runner_executeEvent(Runner* runner, Instance* instance, int32_t eventType, int32_t eventSubtype);
 void Runner_executeEventFromObject(Runner* runner, Instance* instance, Instance* other, int32_t startObjectIndex, int32_t eventType, int32_t eventSubtype);
 void Runner_executeEventForAll(Runner* runner, int32_t eventType, int32_t eventSubtype);

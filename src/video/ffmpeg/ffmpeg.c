@@ -1,6 +1,24 @@
+// ===[ FFmpeg video backend ]===
+//
+// Ported from upstream Butterscotch (src/video/ffmpeg/ffmpeg.c), with two changes
+// that matter for the handheld:
+//
+//  * the frames are converted straight to RGB555LE, the software renderer's native
+//    format, instead of RGBA, so the surface upload is a 2-byte-per-pixel copy and
+//    no per-pixel channel packing happens anywhere;
+//  * playback is paced by a monotonic clock and the audio track's position rather
+//    than by how often the game happens to call video_draw(). Upstream fixed this
+//    in "Fix video playback rate being tied to game framerate" (#566), which is
+//    exactly the bug that made the video crawl on a 1.2 GHz A7: the old code
+//    decoded a fixed four frames per game frame, so a slow device played the video
+//    in slow motion and only ever fired video_end minutes later.
+
 #include "video.h"
 
 #include "gettime.h"
+#include "log.h"
+#include "renderer.h"
+#include "runner.h"
 #include "stdio_compat.h"
 #include "string_compat.h"
 
@@ -19,7 +37,8 @@
 #include <libswresample/swresample.h>
 #include <libswscale/swscale.h>
 
-//fixes sdmc:/ (switch and vita)
+// libavformat wants a protocol prefix on paths that contain a drive letter, and the
+// consoles (and the Miyoo) hand us plain absolute paths.
 static char* ffmpegFileUrl(const char* path) {
     if (path == nullptr) return nullptr;
     if (strncmp(path, "file:", 5) == 0) return safeStrdup(path);
@@ -28,7 +47,7 @@ static char* ffmpegFileUrl(const char* path) {
         return safeStrdup(path);
     }
     size_t len = strlen(path);
-    char* out = (char*)safeMalloc(len + 6);
+    char* out = (char*) safeMalloc(len + 6);
     memcpy(out, "file:", 5);
     memcpy(out + 5, path, len + 1);
     return out;
@@ -40,7 +59,9 @@ static char* ffmpegFileUrl(const char* path) {
 #define VIDEO_FALLBACK_FPS 30.0
 #define VIDEO_MIN_FPS 1.0
 #define VIDEO_MAX_FPS 1000.0
-#define VIDEO_MAX_CATCHUP_FRAMES 120
+// How many frames we let a single update decode when it has fallen behind. A slow
+// decoder burns its whole frame budget here, so the cap keeps a hitch bounded.
+#define VIDEO_MAX_CATCHUP_FRAMES 12
 #define VIDEO_MASTER_JUMP_SECONDS 0.25
 
 typedef struct {
@@ -50,25 +71,24 @@ typedef struct {
     AVCodecContext* videoCodecCtx;
     AVFrame* videoFrame;
     struct SwsContext* swsCtx;
-    uint8_t* drawPixels;
-    int32_t drawLineSize;
+    uint16_t* drawPixels; // width * height packed RGB555, the renderer's format
     int32_t width;
     int32_t height;
     int64_t startPts;
 
     double frameDurationSeconds; // Nominal frame period of the source video.
-    double presentedSeconds;     // Video time of the frame currently sitting in drawPixels.
+    double presentedSeconds;     // Video time of the frame sitting in drawPixels.
     double nextDueSeconds;       // Video time at which the next frame slot opens.
-    uint64_t startNanos;         // Monotonic timestamp the playback clock was started at.
+    uint64_t startNanos;         // Monotonic timestamp the playback clock started at.
     bool clockStarted;
-    bool hasFrame; // A decoded frame is loaded and ready to be drawn.
+    bool hasFrame;
 
-    double masterClock;           // Latest position reported by the audio track, in seconds.
-    double masterAnchorClock;     // Audio position that masterAnchorVideoTime corresponds to.
+    double masterClock;           // Latest position reported by the audio track.
+    double masterAnchorClock;     // Audio position that masterAnchorVideoTime maps to.
     double masterAnchorVideoTime; // Video time the master clock is anchored to.
-    double lastMasterClock;       // Previous master clock value, used to spot restarts.
+    double lastMasterClock;
     bool hasMasterSample;
-    bool masterClockValid; // The audio track is currently driving playback.
+    bool masterClockValid;        // The audio track is driving playback.
 
     double durationSeconds;
     bool hasVideo;
@@ -80,7 +100,7 @@ typedef struct {
 
 static double ffmpegVideoDecoderPtsSeconds(FfmpegVideoDecoder* d, int64_t pts) {
     if (d->videoStream == nullptr || pts == AV_NOPTS_VALUE) return -1;
-    return (double)(pts - d->startPts) * av_q2d(d->videoStream->time_base);
+    return (double) (pts - d->startPts) * av_q2d(d->videoStream->time_base);
 }
 
 static bool ffmpegVideoDecoderMasterClockJumped(FfmpegVideoDecoder* d, double positionSeconds) {
@@ -100,24 +120,27 @@ static double ffmpegVideoDecoderTargetSeconds(FfmpegVideoDecoder* d, uint64_t no
         d->startNanos = now;
         d->clockStarted = true;
     }
-    return (double)(now - d->startNanos) / 1000000000.0;
+    return (double) (now - d->startNanos) / 1000000000.0;
 }
 
 static int32_t ffmpegVideoDecoderFramesDue(FfmpegVideoDecoder* d, double targetSeconds) {
     double behind = targetSeconds - d->nextDueSeconds;
     if (behind < 0) return 0;
-    int32_t due = 1 + (int32_t)(behind / d->frameDurationSeconds);
+    int32_t due = 1 + (int32_t) (behind / d->frameDurationSeconds);
     if (due <= VIDEO_MAX_CATCHUP_FRAMES) return due;
 
+    // Far behind: give up on catching up and drop to the frame we are on, otherwise
+    // one slow update would cascade into every later update.
     d->nextDueSeconds = targetSeconds;
     return 1;
 }
 
 static int32_t ffmpegVideoDecoderConvertFrame(FfmpegVideoDecoder* d, AVFrame* frame) {
     if (d->swsCtx == nullptr || d->drawPixels == nullptr) return -1;
-    uint8_t* dst[1] = {d->drawPixels};
-    int32_t dstStride[1] = {d->drawLineSize};
-    sws_scale(d->swsCtx, (const uint8_t**)frame->data, frame->linesize, 0, d->height, dst, dstStride);
+    uint8_t* dst[1] = { (uint8_t*) d->drawPixels };
+    int32_t dstStride[1] = { d->width * 2 };
+    sws_scale(d->swsCtx, (const uint8_t**) frame->data, frame->linesize, 0, d->height, dst, dstStride);
+
     double ptsSeconds = ffmpegVideoDecoderPtsSeconds(d, frame->pts);
     if (ptsSeconds >= 0) {
         d->presentedSeconds = ptsSeconds;
@@ -158,8 +181,15 @@ static bool ffmpegVideoDecoderRewind(FfmpegVideoDecoder* d) {
 }
 
 static void ffmpegVideoDecoderSetMasterClock(VideoDecoder* decoder, double positionSeconds) {
-    FfmpegVideoDecoder* d = (FfmpegVideoDecoder*)decoder->impl;
+    FfmpegVideoDecoder* d = (FfmpegVideoDecoder*) decoder->impl;
     if (d == nullptr) return;
+    if (positionSeconds < 0 && d->masterClockValid && !d->clockStarted) {
+        // The audio track stopped driving playback (it ended, or it is paused).
+        // Continue the wall clock from the frame we are on rather than restarting it
+        // at zero, which would rewind the video.
+        d->startNanos = nowNanos() - (uint64_t) (d->presentedSeconds * 1e9);
+        d->clockStarted = true;
+    }
     d->masterClock = positionSeconds;
     d->lastMasterClock = positionSeconds;
     d->hasMasterSample = positionSeconds >= 0;
@@ -167,7 +197,7 @@ static void ffmpegVideoDecoderSetMasterClock(VideoDecoder* decoder, double posit
 }
 
 static int32_t ffmpegVideoDecoderUpdate(VideoDecoder* decoder) {
-    FfmpegVideoDecoder* d = (FfmpegVideoDecoder*)decoder->impl;
+    FfmpegVideoDecoder* d = (FfmpegVideoDecoder*) decoder->impl;
     if (d == nullptr || d->formatCtx == nullptr || !d->hasVideo) return VIDEO_FRAME_NONE;
     if (d->finished) return VIDEO_FRAME_NONE;
 
@@ -177,14 +207,15 @@ static int32_t ffmpegVideoDecoderUpdate(VideoDecoder* decoder) {
     int32_t framesToDecode;
     if (d->hasFrame && d->paused) {
         return VIDEO_FRAME_HELD;
-    } else {
-        framesToDecode = ffmpegVideoDecoderFramesDue(d, targetSeconds);
-        if (framesToDecode <= 0) return VIDEO_FRAME_HELD;
     }
+    framesToDecode = ffmpegVideoDecoderFramesDue(d, targetSeconds);
+    if (framesToDecode <= 0) return VIDEO_FRAME_HELD;
 
     bool gotFrame = false;
     bool wrapped = false;
     for (int32_t i = 0; i < framesToDecode; i++) {
+        // Only the frame we are going to show is worth converting; on a slow CPU
+        // sws_scale is a real share of the decode cost.
         bool keep = (i == framesToDecode - 1);
         while (true) {
             if (ffmpegVideoDecoderPullFrame(d)) {
@@ -212,59 +243,61 @@ static int32_t ffmpegVideoDecoderUpdate(VideoDecoder* decoder) {
 }
 
 static void ffmpegVideoDecoderDraw(VideoDecoder* decoder, Runner* runner, int32_t surfaceId) {
-    FfmpegVideoDecoder* d = (FfmpegVideoDecoder*)decoder->impl;
+    FfmpegVideoDecoder* d = (FfmpegVideoDecoder*) decoder->impl;
     if (d == nullptr || d->drawPixels == nullptr || runner->renderer == nullptr) return;
-    if (runner->renderer->vtable->surfaceUploadPixels == nullptr) return;
-    runner->renderer->vtable->surfaceUploadPixels(runner->renderer, surfaceId, d->width, d->height, d->drawPixels);
+    if (runner->renderer->vtable->surfaceUploadRgb555 == nullptr) return;
+    Renderer_surfaceUploadRgb555(runner->renderer, surfaceId, d->drawPixels, d->width, d->height, d->width);
 }
 
 static bool ffmpegVideoDecoderIsRunning(VideoDecoder* decoder) {
-    FfmpegVideoDecoder* d = (FfmpegVideoDecoder*)decoder->impl;
+    FfmpegVideoDecoder* d = (FfmpegVideoDecoder*) decoder->impl;
     return d != nullptr && d->hasVideo && !d->finished;
 }
 
 static bool ffmpegVideoDecoderIsPaused(VideoDecoder* decoder) {
-    FfmpegVideoDecoder* d = (FfmpegVideoDecoder*)decoder->impl;
+    FfmpegVideoDecoder* d = (FfmpegVideoDecoder*) decoder->impl;
     return d != nullptr && d->paused;
 }
 
 static void ffmpegVideoDecoderPause(VideoDecoder* decoder) {
-    FfmpegVideoDecoder* d = (FfmpegVideoDecoder*)decoder->impl;
+    FfmpegVideoDecoder* d = (FfmpegVideoDecoder*) decoder->impl;
     if (d != nullptr) d->paused = true;
 }
 
 static void ffmpegVideoDecoderResume(VideoDecoder* decoder) {
-    FfmpegVideoDecoder* d = (FfmpegVideoDecoder*)decoder->impl;
+    FfmpegVideoDecoder* d = (FfmpegVideoDecoder*) decoder->impl;
     if (d == nullptr) return;
     d->paused = false;
-    d->clockStarted = false;
+    // Resume from the frame that is on screen, with or without an audio clock.
+    d->startNanos = nowNanos() - (uint64_t) (d->presentedSeconds * 1e9);
+    d->clockStarted = true;
     d->hasMasterSample = false;
 }
 
 static void ffmpegVideoDecoderSetLoop(VideoDecoder* decoder, bool loop) {
-    FfmpegVideoDecoder* d = (FfmpegVideoDecoder*)decoder->impl;
+    FfmpegVideoDecoder* d = (FfmpegVideoDecoder*) decoder->impl;
     if (d != nullptr) d->loop = loop;
 }
 
 static double ffmpegVideoDecoderDuration(VideoDecoder* decoder) {
-    FfmpegVideoDecoder* d = (FfmpegVideoDecoder*)decoder->impl;
+    FfmpegVideoDecoder* d = (FfmpegVideoDecoder*) decoder->impl;
     if (d == nullptr) return 0;
     return d->durationSeconds;
 }
 
 static double ffmpegVideoDecoderPosition(VideoDecoder* decoder) {
-    FfmpegVideoDecoder* d = (FfmpegVideoDecoder*)decoder->impl;
+    FfmpegVideoDecoder* d = (FfmpegVideoDecoder*) decoder->impl;
     if (d == nullptr || !d->hasFrame) return 0;
     return d->presentedSeconds;
 }
 
 static int32_t ffmpegVideoDecoderWidth(VideoDecoder* decoder) {
-    FfmpegVideoDecoder* d = (FfmpegVideoDecoder*)decoder->impl;
+    FfmpegVideoDecoder* d = (FfmpegVideoDecoder*) decoder->impl;
     return d == nullptr ? 0 : d->width;
 }
 
 static int32_t ffmpegVideoDecoderHeight(VideoDecoder* decoder) {
-    FfmpegVideoDecoder* d = (FfmpegVideoDecoder*)decoder->impl;
+    FfmpegVideoDecoder* d = (FfmpegVideoDecoder*) decoder->impl;
     return d == nullptr ? 0 : d->height;
 }
 
@@ -276,15 +309,15 @@ static void ffmpegVideoDecoderQuit(VideoDecoder* decoder) {
 }
 
 static void ffmpegVideoDecoderClose(VideoDecoder* decoder) {
-    FfmpegVideoDecoder* d = (FfmpegVideoDecoder*)decoder->impl;
+    FfmpegVideoDecoder* d = (FfmpegVideoDecoder*) decoder->impl;
     if (d == nullptr) return;
     if (d->swsCtx != nullptr) { sws_freeContext(d->swsCtx); d->swsCtx = nullptr; }
-    if (d->drawPixels != nullptr) { av_freep(&d->drawPixels); d->drawPixels = nullptr; }
+    free(d->drawPixels);
+    d->drawPixels = nullptr;
     if (d->videoFrame != nullptr) { av_frame_free(&d->videoFrame); d->videoFrame = nullptr; }
     if (d->videoCodecCtx != nullptr) { avcodec_free_context(&d->videoCodecCtx); d->videoCodecCtx = nullptr; }
     if (d->formatCtx != nullptr) { avformat_close_input(&d->formatCtx); d->formatCtx = nullptr; }
     d->videoStream = nullptr;
-    d->drawLineSize = 0;
     d->videoStreamIndex = -1;
     d->width = 0;
     d->height = 0;
@@ -310,17 +343,21 @@ static void ffmpegVideoDecoderClose(VideoDecoder* decoder) {
 }
 
 static bool ffmpegVideoDecoderOpen(VideoDecoder* decoder, const char* url) {
-    FfmpegVideoDecoder* d = (FfmpegVideoDecoder*)decoder->impl;
+    FfmpegVideoDecoder* d = (FfmpegVideoDecoder*) decoder->impl;
     char* ffmpegUrl = ffmpegFileUrl(url);
     int openResult = avformat_open_input(&d->formatCtx, ffmpegUrl, nullptr, nullptr);
     free(ffmpegUrl);
-    if (openResult != 0) return false;
+    if (openResult != 0) {
+        logWarn("Video: could not open '%s'\n", url);
+        return false;
+    }
     if (avformat_find_stream_info(d->formatCtx, nullptr) < 0) {
         avformat_close_input(&d->formatCtx);
         d->formatCtx = nullptr;
+        logWarn("Video: no stream info in '%s'\n", url);
         return false;
     }
-    d->durationSeconds = d->formatCtx->duration > 0 ? (double)d->formatCtx->duration / (double)AV_TIME_BASE : 0;
+    d->durationSeconds = d->formatCtx->duration > 0 ? (double) d->formatCtx->duration / (double) AV_TIME_BASE : 0;
 
     const AVCodec* videoCodec = nullptr;
     d->videoStreamIndex = av_find_best_stream(d->formatCtx, AVMEDIA_TYPE_VIDEO, -1, -1, &videoCodec, 0);
@@ -329,6 +366,8 @@ static bool ffmpegVideoDecoderOpen(VideoDecoder* decoder, const char* url) {
         d->videoCodecCtx = avcodec_alloc_context3(videoCodec);
         if (d->videoCodecCtx != nullptr) {
             if (avcodec_parameters_to_context(d->videoCodecCtx, d->videoStream->codecpar) == 0) {
+                // Extra threads cost memory (128 MB on the Miyoo) and the handheld
+                // decodes one frame at a time anyway; there is nothing to overlap.
                 d->videoCodecCtx->thread_count = 1;
                 if (avcodec_open2(d->videoCodecCtx, videoCodec, nullptr) == 0) d->hasVideo = true;
             }
@@ -342,6 +381,7 @@ static bool ffmpegVideoDecoderOpen(VideoDecoder* decoder, const char* url) {
     }
 
     if (!d->hasVideo) {
+        logWarn("Video: no usable video stream in '%s'\n", url);
         ffmpegVideoDecoderClose(decoder);
         return false;
     }
@@ -350,7 +390,7 @@ static bool ffmpegVideoDecoderOpen(VideoDecoder* decoder, const char* url) {
     d->height = d->videoCodecCtx->height;
     d->startPts = d->videoStream->start_time == AV_NOPTS_VALUE ? 0 : d->videoStream->start_time;
     if (d->durationSeconds <= 0 && d->videoStream->duration > 0) {
-        d->durationSeconds = (double)d->videoStream->duration * av_q2d(d->videoStream->time_base);
+        d->durationSeconds = (double) d->videoStream->duration * av_q2d(d->videoStream->time_base);
     }
 
     d->videoFrame = av_frame_alloc();
@@ -359,16 +399,15 @@ static bool ffmpegVideoDecoderOpen(VideoDecoder* decoder, const char* url) {
         return false;
     }
     d->swsCtx = sws_getContext(d->width, d->height, d->videoCodecCtx->pix_fmt,
-                               d->width, d->height, AV_PIX_FMT_RGBA,
-                               SWS_BILINEAR, nullptr, nullptr, nullptr);
-    int drawLinesizes[4] = {0};
-    uint8_t* drawPixels[4] = {nullptr};
-    if (d->swsCtx == nullptr || av_image_alloc(drawPixels, drawLinesizes, d->width, d->height, AV_PIX_FMT_RGBA, 1) < 0) {
+                               d->width, d->height, AV_PIX_FMT_RGB555LE,
+                               SWS_FAST_BILINEAR, nullptr, nullptr, nullptr);
+    d->drawPixels = (uint16_t*) safeMalloc((size_t) d->width * (size_t) d->height * sizeof(uint16_t));
+    if (d->swsCtx == nullptr || d->drawPixels == nullptr) {
+        logWarn("Video: could not set up the RGB555 conversion for '%s'\n", url);
         ffmpegVideoDecoderClose(decoder);
         return false;
     }
-    d->drawPixels = drawPixels[0];
-    d->drawLineSize = drawLinesizes[0];
+    memset(d->drawPixels, 0, (size_t) d->width * (size_t) d->height * sizeof(uint16_t));
 
     AVRational frameRate = d->videoStream->avg_frame_rate;
     if (frameRate.num <= 0 || frameRate.den <= 0) frameRate = d->videoStream->r_frame_rate;
@@ -391,8 +430,16 @@ static bool ffmpegVideoDecoderOpen(VideoDecoder* decoder, const char* url) {
     d->lastMasterClock = 0;
     d->hasMasterSample = false;
     d->masterClockValid = false;
+
+    logInfo("Video: opened '%s' (%dx%d, %.1fs, %.2f fps)\n", url, d->width, d->height, d->durationSeconds, fps);
     return true;
 }
+
+// ===[ Audio track extraction ]===
+//
+// The audio system can only stream WAV, so the whole (short) audio track is
+// decoded once at open and handed to it as a WAV in the save folder. The stream's
+// playback position then becomes the master clock for the video.
 
 typedef struct VideoWavWriter {
     FILE* file;
@@ -413,12 +460,12 @@ static void videoAudioWriteWavHeader(uint8_t* wav, uint32_t dataSize, int32_t ch
     memcpy(wav + 16, &fmtSize, 4);
     uint16_t audioFormat = 1;
     memcpy(wav + 20, &audioFormat, 2);
-    uint16_t numChannels = (uint16_t)channels;
+    uint16_t numChannels = (uint16_t) channels;
     memcpy(wav + 22, &numChannels, 2);
     memcpy(wav + 24, &sampleRate, 4);
-    uint32_t byteRate = (uint32_t)(sampleRate * channels * 2);
+    uint32_t byteRate = (uint32_t) (sampleRate * channels * 2);
     memcpy(wav + 28, &byteRate, 4);
-    uint16_t blockAlign = (uint16_t)(channels * 2);
+    uint16_t blockAlign = (uint16_t) (channels * 2);
     memcpy(wav + 32, &blockAlign, 2);
     uint16_t bitsPerSample = 16;
     memcpy(wav + 34, &bitsPerSample, 2);
@@ -447,7 +494,7 @@ static void videoWavWriterPush(VideoWavWriter* w, const uint8_t* data, uint32_t 
     }
     if (w->pcmSize + size > w->pcmCapacity) {
         w->pcmCapacity = w->pcmSize + size + 65536;
-        w->pcm = (uint8_t*)safeRealloc(w->pcm, w->pcmCapacity);
+        w->pcm = (uint8_t*) safeRealloc(w->pcm, w->pcmCapacity);
     }
     memcpy(w->pcm + w->pcmSize, data, size);
     w->pcmSize += size;
@@ -457,7 +504,7 @@ static bool videoWavWriterFinish(VideoWavWriter* w, const char* wavPath, FileSys
     if (w->file != nullptr) {
         long pos = ftell(w->file);
         if (pos > 44) {
-            uint32_t dataSize = (uint32_t)(pos - 44);
+            uint32_t dataSize = (uint32_t) (pos - 44);
             uint32_t riffSize = 36 + dataSize;
             if (fseek(w->file, 4, SEEK_SET) == 0) fwrite(&riffSize, 1, 4, w->file);
             if (fseek(w->file, 40, SEEK_SET) == 0) fwrite(&dataSize, 1, 4, w->file);
@@ -468,10 +515,10 @@ static bool videoWavWriterFinish(VideoWavWriter* w, const char* wavPath, FileSys
     }
     if (w->pcm != nullptr && w->pcmSize > 0 && fs != nullptr) {
         uint32_t wavSize = 44 + w->pcmSize;
-        uint8_t* wav = (uint8_t*)safeMalloc(wavSize);
+        uint8_t* wav = (uint8_t*) safeMalloc(wavSize);
         videoAudioWriteWavHeader(wav, w->pcmSize, w->channels, w->sampleRate);
         memcpy(wav + 44, w->pcm, w->pcmSize);
-        bool wrote = fs->vtable->writeFileBinary(fs, wavPath, wav, (int32_t)wavSize);
+        bool wrote = fs->vtable->writeFileBinary(fs, wavPath, wav, (int32_t) wavSize);
         free(wav);
         return wrote;
     }
@@ -482,11 +529,11 @@ static void videoAudioAppendConverted(VideoWavWriter* w, struct SwrContext* swrC
     if (swrCtx == nullptr || frame->nb_samples <= 0) return;
     int32_t outSamples = swr_get_out_samples(swrCtx, frame->nb_samples);
     if (outSamples <= 0) return;
-    int32_t bytes = outSamples * VIDEO_AUDIO_CHANNELS * (int32_t)sizeof(int16_t);
-    uint8_t* tmp = (uint8_t*)safeMalloc((size_t)bytes);
-    int32_t converted = swr_convert(swrCtx, &tmp, outSamples, (const uint8_t**)frame->data, frame->nb_samples);
+    int32_t bytes = outSamples * VIDEO_AUDIO_CHANNELS * (int32_t) sizeof(int16_t);
+    uint8_t* tmp = (uint8_t*) safeMalloc((size_t) bytes);
+    int32_t converted = swr_convert(swrCtx, &tmp, outSamples, (const uint8_t**) frame->data, frame->nb_samples);
     if (converted > 0) {
-        uint32_t convBytes = (uint32_t)converted * VIDEO_AUDIO_CHANNELS * (uint32_t)sizeof(int16_t);
+        uint32_t convBytes = (uint32_t) converted * VIDEO_AUDIO_CHANNELS * (uint32_t) sizeof(int16_t);
         videoWavWriterPush(w, tmp, convBytes);
     }
     free(tmp);
@@ -565,9 +612,10 @@ static bool ffmpegVideoDecoderExtractAudio(VideoDecoder* decoder, Runner* runner
 static VideoDecoderVtable ffmpegVideoDecoderVtable;
 
 VideoDecoder* VideoDecoder_createBackend(void) {
-    VideoDecoder* decoder = (VideoDecoder*)safeCalloc(1, sizeof(VideoDecoder));
-    FfmpegVideoDecoder* impl = (FfmpegVideoDecoder*)safeCalloc(1, sizeof(FfmpegVideoDecoder));
+    VideoDecoder* decoder = (VideoDecoder*) safeCalloc(1, sizeof(VideoDecoder));
+    FfmpegVideoDecoder* impl = (FfmpegVideoDecoder*) safeCalloc(1, sizeof(FfmpegVideoDecoder));
     impl->videoStreamIndex = -1;
+    impl->frameDurationSeconds = 1.0 / VIDEO_FALLBACK_FPS;
     ffmpegVideoDecoderVtable.init = ffmpegVideoDecoderInit;
     ffmpegVideoDecoderVtable.quit = ffmpegVideoDecoderQuit;
     ffmpegVideoDecoderVtable.open = ffmpegVideoDecoderOpen;

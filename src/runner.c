@@ -19,7 +19,7 @@
 
 #include "debug_overlay.h"
 #include "gettime.h"
-#include "video/video_player.h"
+#include "video/video.h"
 #include "stb_ds.h"
 
 #include <errno.h>
@@ -2547,6 +2547,10 @@ Runner* Runner_create(DataWin* dataWin, VMContext* vm, Renderer* renderer, FileS
     runner->currentVertexFormatId = 1;
     runner->vertexBuffers = nullptr;
     runner->vertexBufferCount = 0;
+    runner->videoSurface = -1;
+    runner->videoAudioStream = -1;
+    runner->videoAudioInstance = -1;
+    runner->videoVolume = 1.0;
     runner->appSurfaceEnabled = true;
     runner->windowTitle = dataWin->gen8.displayName ? safeStrdup(dataWin->gen8.displayName) : nullptr;
     runner->appSurfaceAutoDraw = true;
@@ -4156,10 +4160,80 @@ static void runnerFireVideoEvent(Runner* runner, const char* type)
     runner->asyncLoadMapId = -1;
 }
 
+// ===[ Video audio ]===
+//
+// The decoder dumps the video's audio track into a WAV at open; the audio system
+// streams it as a normal sound, which also gives us a master clock so the picture
+// follows the sound instead of drifting away from it.
+
+static void runnerVideoAudioStop(Runner* runner)
+{
+    AudioSystem* audio = runner->audioSystem;
+    if (audio != nullptr) {
+        if (runner->videoAudioInstance >= SOUND_INSTANCE_ID_BASE)
+            audio->vtable->stopSound(audio, runner->videoAudioInstance);
+        if (runner->videoAudioStream >= 0)
+            audio->vtable->destroyStream(audio, runner->videoAudioStream);
+    }
+    runner->videoAudioInstance = -1;
+    runner->videoAudioStream = -1;
+
+    if (runner->fileSystem != nullptr)
+        runner->fileSystem->vtable->deleteFile(runner->fileSystem, "butterscotch_video_extract.wav");
+}
+
+static void runnerVideoAudioPlay(Runner* runner)
+{
+    AudioSystem* audio = runner->audioSystem;
+    if (audio == nullptr || runner->videoAudioStream < 0) return;
+
+    if (runner->videoAudioInstance >= SOUND_INSTANCE_ID_BASE)
+        audio->vtable->stopSound(audio, runner->videoAudioInstance);
+
+    runner->videoAudioInstance = audio->vtable->playSound(audio, runner->videoAudioStream, 0, false);
+    if (runner->videoAudioInstance >= SOUND_INSTANCE_ID_BASE)
+        audio->vtable->setSoundGain(audio, runner->videoAudioInstance, (float) runner->videoVolume, 0);
+}
+
+static void runnerVideoAudioStart(Runner* runner, const char* url)
+{
+    runnerVideoAudioStop(runner);
+
+    AudioSystem* audio = runner->audioSystem;
+    VideoDecoder* video = runner->video;
+    if (audio == nullptr || video == nullptr || video->vtable->extractAudio == nullptr) return;
+    if (!video->vtable->extractAudio(video, runner, url)) {
+        logInfo("Video: no audio track extracted\n");
+        return;
+    }
+
+    int32_t stream = audio->vtable->createStream(audio, "butterscotch_video_extract.wav");
+    if (stream < 0) return;
+
+    runner->videoAudioStream = stream;
+    runnerVideoAudioPlay(runner);
+    logInfo("Video: audio stream %d, voice %d\n", stream, runner->videoAudioInstance);
+}
+
+// Where the audio track is right now, or -1 when it is not playing (then the
+// decoder falls back to the wall clock).
+static double runnerVideoAudioPosition(Runner* runner)
+{
+    AudioSystem* audio = runner->audioSystem;
+    if (audio == nullptr || runner->videoAudioInstance < SOUND_INSTANCE_ID_BASE) return -1;
+    if (!audio->vtable->isPlaying(audio, runner->videoAudioInstance)) return -1;
+    return (double) audio->vtable->getTrackPosition(audio, runner->videoAudioInstance);
+}
+
 void Runner_videoClose(Runner* runner)
 {
+    runnerVideoAudioStop(runner);
+
     if (runner->video != nullptr) {
-        VideoPlayer_close(runner->video);
+        runner->video->vtable->close(runner->video);
+        runner->video->vtable->quit(runner->video);
+        free(runner->video->impl);
+        free(runner->video);
         runner->video = nullptr;
     }
     if (runner->videoSurface >= 0) {
@@ -4168,32 +4242,58 @@ void Runner_videoClose(Runner* runner)
             runner->renderer->vtable->surfaceFree(runner->renderer, runner->videoSurface);
         runner->videoSurface = -1;
     }
+    runner->videoRunning = false;
 }
 
 bool Runner_videoOpen(Runner* runner, const char* path)
 {
     Runner_videoClose(runner);
 
-    if (!VideoPlayer_isSupported() || runner->renderer == nullptr)
+    if (runner->renderer == nullptr || runner->renderer->vtable->surfaceUploadRgb555 == nullptr)
         return false;
 
     char resolved[1024];
     if (!runnerResolveAssetPath(runner, path, resolved, sizeof(resolved)))
         return false;
 
-    VideoPlayer* video = VideoPlayer_open(resolved);
+    VideoDecoder* video = VideoDecoder_createBackend();
     if (video == nullptr)
         return false;
+    if (!video->vtable->init())
+    {
+        free(video->impl);
+        free(video);
+        return false;
+    }
 
-    int32_t surface = Renderer_createSurface(runner->renderer, VideoPlayer_width(video), VideoPlayer_height(video));
-    if (surface < 0) {
-        VideoPlayer_close(video);
+    if (!video->vtable->open(video, resolved))
+    {
+        video->vtable->quit(video);
+        free(video->impl);
+        free(video);
         return false;
     }
 
     runner->video = video;
-    runner->videoSurface = surface;
-    VideoPlayer_uploadFrame(video, runner->renderer, surface);
+    runner->videoVolume = 1.0;
+    runner->videoLoop = false;
+    runner->videoRunning = true;
+
+    // Surface is created lazily on the first frame so a video that fails to decode
+    // never costs us a full-screen surface.
+    runner->videoSurface = Renderer_createSurface(runner->renderer,
+                                                 video->vtable->width(video), video->vtable->height(video));
+    if (runner->videoSurface < 0) {
+        Runner_videoClose(runner);
+        return false;
+    }
+
+    runnerVideoAudioStart(runner, resolved);
+
+    // Decode and upload the first frame before the game ever asks for the surface,
+    // so the first Draw shows the picture instead of an empty surface.
+    if (video->vtable->update(video) >= VIDEO_FRAME_READY)
+        video->vtable->draw(video, runner, runner->videoSurface);
 
     // GameMaker reports the start asynchronously, and the game uses that event to
     // begin drawing the video at all.
@@ -4204,30 +4304,111 @@ bool Runner_videoOpen(Runner* runner, const char* path)
 // Returns the surface holding the current video frame, or -1 when there is none.
 int32_t Runner_videoSurface(Runner* runner)
 {
-    if (runner->video == nullptr)
-        return -1;
-    if (VideoPlayer_status(runner->video) != 0)
+    if (runner->video == nullptr || !runner->videoRunning)
         return -1;
     return runner->videoSurface;
 }
 
-VideoPlayer* Runner_getVideo(Runner* runner)
+VideoDecoder* Runner_getVideo(Runner* runner)
 {
     return runner->video;
 }
 
+int32_t Runner_videoStatus(Runner* runner)
+{
+    if (runner->video == nullptr || !runner->videoRunning) return 2;
+    if (runner->video->vtable->isPaused(runner->video)) return 1;
+    if (!runner->video->vtable->isRunning(runner->video)) return 2;
+    return 0;
+}
+
+int32_t Runner_videoFormat(Runner* runner)
+{
+    (void) runner;
+    return 0; // RGB frames; the game's YUV shader path is never used
+}
+
+double Runner_videoPosition(Runner* runner)
+{
+    return runner->video == nullptr ? 0.0 : runner->video->vtable->position(runner->video);
+}
+
+double Runner_videoDuration(Runner* runner)
+{
+    return runner->video == nullptr ? 0.0 : runner->video->vtable->duration(runner->video);
+}
+
+void Runner_videoSetVolume(Runner* runner, double volume)
+{
+    if (volume < 0.0) volume = 0.0;
+    if (volume > 1.0) volume = 1.0;
+    runner->videoVolume = volume;
+    if (runner->audioSystem != nullptr && runner->videoAudioInstance >= SOUND_INSTANCE_ID_BASE)
+        runner->audioSystem->vtable->setSoundGain(runner->audioSystem, runner->videoAudioInstance, (float) volume, 0);
+}
+
+void Runner_videoSetLoop(Runner* runner, bool loop)
+{
+    runner->videoLoop = loop;
+    if (runner->video != nullptr) runner->video->vtable->setLoop(runner->video, loop);
+}
+
+void Runner_videoPause(Runner* runner)
+{
+    if (runner->video == nullptr) return;
+    runner->video->vtable->pause(runner->video);
+    AudioSystem* audio = runner->audioSystem;
+    if (audio != nullptr && runner->videoAudioInstance >= SOUND_INSTANCE_ID_BASE && audio->vtable->pauseSound != nullptr)
+        audio->vtable->pauseSound(audio, runner->videoAudioInstance);
+}
+
+void Runner_videoResume(Runner* runner)
+{
+    if (runner->video == nullptr) return;
+    runner->video->vtable->resume(runner->video);
+    AudioSystem* audio = runner->audioSystem;
+    if (audio != nullptr && runner->videoAudioInstance >= SOUND_INSTANCE_ID_BASE && audio->vtable->resumeSound != nullptr) {
+        if (audio->vtable->isPlaying(audio, runner->videoAudioInstance))
+            audio->vtable->resumeSound(audio, runner->videoAudioInstance);
+        else
+            runnerVideoAudioPlay(runner);
+    }
+}
+
 void Runner_videoUpdate(Runner* runner, float deltaSeconds)
 {
-    if (runner->video != nullptr)
+    // The decoder paces itself off the monotonic clock and the audio track, so the
+    // game's frame time is deliberately not used here: on a machine that renders at
+    // 10 fps the video must still play at its own speed.
+    (void) deltaSeconds;
+
+    if (runner->video != nullptr && runner->videoRunning)
     {
-        bool ended = VideoPlayer_update(runner->video, deltaSeconds);
+        VideoDecoder* video = runner->video;
 
-        if (runner->videoSurface >= 0 && runner->renderer != nullptr)
-            VideoPlayer_uploadFrame(runner->video, runner->renderer, runner->videoSurface);
-
-        if (ended)
+        if (video->vtable->isPaused(video))
+        {
+            // Nothing to decode and the clock must not run; resume() re-anchors it.
+        }
+        else if (!video->vtable->isRunning(video))
+        {
+            runner->videoRunning = false;
+            runnerVideoAudioStop(runner);
             runner->videoPendingEvent = 2;
+        }
+        else
+        {
+            video->vtable->setMasterClock(video, runnerVideoAudioPosition(runner));
 
+            int32_t result = video->vtable->update(video);
+            if (result == VIDEO_FRAME_LOOPED) {
+                runnerVideoAudioPlay(runner);
+                video->vtable->setMasterClock(video, runnerVideoAudioPosition(runner));
+            }
+            if (result == VIDEO_FRAME_READY || result == VIDEO_FRAME_LOOPED)
+                video->vtable->draw(video, runner, runner->videoSurface);
+
+        }
     }
 
     if (runner->videoPendingEvent == 1) {
