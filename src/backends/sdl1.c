@@ -41,6 +41,8 @@ typedef struct {
 static GamepadMapping joystickMappings[MAX_GAMEPADS];
 // Slots whose "pad present but unmapped" line was already logged.
 static bool unmappedReported[MAX_GAMEPADS];
+// SDL 1.2 keysyms are well below this; used to remember which keys were logged once.
+#define SDL_LOG_KEY_SYMS 1024
 
 static void parseMappingField(GamepadMapping* mapping, const char* key, const char* val) {
     int gml_btn = -1;
@@ -562,15 +564,20 @@ bool platformHandleEvents(void) {
                 if (InputRecording_isPlaybackActive(globalInputRecording)) break;
                 {
                     int32_t gmlKey = SDLKeyToGml(e.key.keysym.sym);
-                    // BUTTERSCOTCH_LOG_KEYS=1 prints what each physical button sends.
-                    // Handhelds deliver their pad as keyboard events, and without this
-                    // there is no way to find the key behind e.g. L2.
-                    static int logKeys = -1;
-                    if (logKeys < 0) {
+                    // Handhelds deliver their pad as keyboard events, and the key a
+                    // physical button sends differs from unit to unit, so the first press
+                    // of every distinct key is logged: a handful of lines per session, and
+                    // enough to identify a button. BUTTERSCOTCH_LOG_KEYS=1 logs every press.
+                    static bool loggedSyms[SDL_LOG_KEY_SYMS];
+                    static int logEveryKey = -1;
+                    if (logEveryKey < 0) {
                         const char* env = getenv("BUTTERSCOTCH_LOG_KEYS");
-                        logKeys = (env != nullptr && env[0] != '\0' && env[0] != '0') ? 1 : 0;
+                        logEveryKey = (env != nullptr && env[0] != '\0' && env[0] != '0') ? 1 : 0;
                     }
-                    if (logKeys) {
+                    unsigned int sym = (unsigned int) e.key.keysym.sym;
+                    bool seen = sym < SDL_LOG_KEY_SYMS ? loggedSyms[sym] : false;
+                    if (logEveryKey || !seen) {
+                        if (sym < SDL_LOG_KEY_SYMS) loggedSyms[sym] = true;
                         logInfo("Key down: sdl='%s' (%d) -> gml %d\n",
                                 SDL_GetKeyName(e.key.keysym.sym),
                                 (int) e.key.keysym.sym, gmlKey);
