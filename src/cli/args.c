@@ -96,6 +96,13 @@ static void printUsage(const char *argv0) {
         "    --log-file <file>                      - Mirror all log output into a text file\n"
         "    --perf-log <file>                      - Write a shareable frame performance log (slow frames, room changes, GML hotspots)\n"
         "    --perf-log-slow-ms <ms>                - Frame time considered slow by --perf-log (default 50)\n"
+#ifdef ENABLE_SW_RENDERER
+        "\n"
+        "  In-game, on the software renderer:\n"
+        "    Start + L2 (or F7)                    - Toggle the fps/memory overlay\n"
+        "    Start + R2 (or F8)                    - Toggle adaptive frame skipping\n"
+        "    F9                                    - Save the current frame as a PNG and log its draws\n"
+#endif
         "    --disable-log-colours                  - Disable colours for warning, error, and debug logs\n"
         "    --disable-log-colors                   - Same as --disable-log-colours, but different spelling\n"
 #ifdef ENABLE_VM_OPCODE_PROFILER

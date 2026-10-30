@@ -102,14 +102,16 @@ typedef struct {
 } BS_PROCESS_MEMORY_COUNTERS;
 #endif
 
-// True when `button` was pressed on any connected pad while the Menu button is
-// being held. Used for the runtime toggles (Menu + L2 / Menu + R2).
-static bool gamepadMenuComboPressed(Runner* runner, int32_t button) {
+// True when `button` was pressed on any connected pad while Start is being held.
+// Used for the runtime toggles (Start + L2 / Start + R2). Start rather than Menu
+// because the Miyoo firmware/Onion registers the Menu button itself and eats it
+// before the game ever sees it.
+static bool gamepadStartComboPressed(Runner* runner, int32_t button) {
     if (runner == nullptr || runner->gamepads == nullptr) return false;
 
     for (int32_t device = 0; device < MAX_GAMEPADS; device++) {
         if (!RunnerGamepad_isConnected(runner->gamepads, device)) continue;
-        if (!RunnerGamepad_buttonCheck(runner->gamepads, device, GP_HOME)) continue;
+        if (!RunnerGamepad_buttonCheck(runner->gamepads, device, GP_START)) continue;
         if (RunnerGamepad_buttonCheckPressed(runner->gamepads, device, button)) return true;
     }
     return false;
@@ -1706,14 +1708,14 @@ int loop(CommandLineArgs args, const char *argv0) {
             }
 
             if (shouldStep) {
-                // Menu + L2 / Menu + R2 toggles and the F9 capture request. These sit
+                // Start + L2 / Start + R2 toggles and the F9 capture request. These sit
                 // after the step because input recordings are injected just before it.
-                if (gamepadMenuComboPressed(runner, GP_SHOULDERLB) ||
+                if (gamepadStartComboPressed(runner, GP_SHOULDERLB) ||
                     RunnerKeyboard_checkPressed(runner->keyboard, VK_F7)) {
                     showPerfOverlay = !showPerfOverlay;
                     logInfo("Overlay: %s\n", showPerfOverlay ? "on" : "off");
                 }
-                if (gamepadMenuComboPressed(runner, GP_SHOULDERRB) ||
+                if (gamepadStartComboPressed(runner, GP_SHOULDERRB) ||
                     RunnerKeyboard_checkPressed(runner->keyboard, VK_F8)) {
                     frameSkipEnabled = !frameSkipEnabled;
                     frameSkipRun = 0;
