@@ -8,6 +8,7 @@
 #include "debug_font/debug_font.h"
 
 #include "sw_renderer_private.h"
+#include "sw_draw_profile.h"
 
 void platformSetNextFramebuffer(uintpixel_t* framebuffer, int width, int height);
 void platformSwapBuffers(void);
@@ -572,7 +573,8 @@ static void SWRenderer_drawSprite(Renderer* renderer, int32_t tpagIndex, float x
     dy += y;
 
     SWTexture* texture = swr->textures[pageId];
-    
+    uint64_t profStart = swrDrawProfileBegin();
+
     if (UNLIKELY(swrMustRotate(angleDeg)))
     {
         float pivotX = (x - dx) * swrSgn(xscale);
@@ -589,6 +591,8 @@ static void SWRenderer_drawSprite(Renderer* renderer, int32_t tpagIndex, float x
     {
         swrDrawSprite(renderer, dx, dy, dw, dh, texture, sx, sy, sw, sh, color, alpha);
     }
+
+    swrDrawProfileEnd(SWR_DRAW_SPRITE, tpagIndex, dw * dh, profStart);
 }
 
 static void SWRenderer_drawSpritePart(Renderer* renderer, int32_t tpagIndex,
@@ -638,7 +642,8 @@ static void SWRenderer_drawSpritePart(Renderer* renderer, int32_t tpagIndex,
     }
     
     SWTexture* texture = swr->textures[pageId];
-    
+    uint64_t profStart = swrDrawProfileBegin();
+
     if (UNLIKELY(swrMustRotate(angleDeg)))
     {
         swrDrawSpriteRotated(renderer, dx, dy, dw, dh, texture, sx, sy, sw, sh, color, alpha, angleDeg, pivotX * dw, pivotY * dh);
@@ -647,6 +652,8 @@ static void SWRenderer_drawSpritePart(Renderer* renderer, int32_t tpagIndex,
     {
         swrDrawSprite(renderer, dx, dy, dw, dh, texture, sx, sy, sw, sh, color, alpha);
     }
+
+    swrDrawProfileEnd(SWR_DRAW_SPRITE_PART, tpagIndex, dw * dh, profStart);
 }
 
 // draw_sprite_pos(): the sprite's source rectangle mapped onto four arbitrary
@@ -696,8 +703,10 @@ static void SWRenderer_drawSpritePos(Renderer* renderer, int32_t tpagIndex,
     const float u2 = (float) (sx + sw), v2 = (float) (sy + sh);
     const float u3 = (float) sx, v3 = (float) (sy + sh);
 
+    uint64_t profStart = swrDrawProfileBegin();
     swrDrawTexturedTriangle(renderer, texture, x1, y1, u0, v0, x2, y2, u1, v1, x3, y3, u2, v2, alphaInt);
     swrDrawTexturedTriangle(renderer, texture, x1, y1, u0, v0, x3, y3, u2, v2, x4, y4, u3, v3, alphaInt);
+    swrDrawProfileEnd(SWR_DRAW_SPRITE_POS, tpagIndex, 0, profStart);
 }
 
 static void SWRenderer_drawRectangle(Renderer* renderer, float x1, float y1, float x2, float y2,
@@ -859,6 +868,7 @@ static void SWRenderer_drawSpriteTiled(Renderer* renderer, int32_t tpagIndex,
     int sx1 = xscale * localX1;
     int sy1 = yscale * localY1;
 
+    uint64_t profStart = swrDrawProfileBegin();
     for (int dy = startY; endY > dy; dy += tileH) {
         int cy = dy + (int)(originY * ayScale);
         int vy0 = cy + sy0;
@@ -874,6 +884,7 @@ static void SWRenderer_drawSpriteTiled(Renderer* renderer, int32_t tpagIndex,
             swrDrawSprite(renderer, vx0, vy0, dw, dh, swr->textures[pageId], sx, sy, sw, sh, color, alpha);
         }
     }
+    swrDrawProfileEnd(SWR_DRAW_SPRITE_TILED, tpagIndex, 0, profStart);
 }
 
 static void SWRenderer_drawSurfaceTiled(Renderer* renderer, int32_t surfaceID, float x, float y, float xscale, float yscale, float roomW, float roomH, uint32_t color, float alpha)

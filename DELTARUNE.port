@@ -59,6 +59,12 @@ export BUTTERSCOTCH_LOG_KEYS=0
 # frames due). Set to 1 when a cutscene plays but the picture does not move.
 export BUTTERSCOTCH_LOG_VIDEO=0
 
+# Print, once a second, the draws that actually spent the frame's draw time:
+# kind, texture-page item, total ms, us per draw, pixels per draw. This is how a
+# heavy room gets diagnosed - pixel counts alone do not say whether the frame is
+# pixel-bound or bound by per-draw overhead.
+export BUTTERSCOTCH_PROFILE_DRAWS=0
+
 # Cutscene video. Leave the scale at 0: the game places the video using the size the
 # file reports, so a downscaled surface is drawn small and cropped. Set the thread
 # count to 2 to nearly halve 720p decode time (costs a few MB of memory).

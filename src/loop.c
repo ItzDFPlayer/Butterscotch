@@ -51,6 +51,7 @@
 #endif
 #ifdef ENABLE_SW_RENDERER
 #include "sw_renderer.h"
+#include "sw/sw_draw_profile.h"
 #endif
 #ifdef ENABLE_NOOP_RENDERER
 #include "noop_renderer.h"
@@ -2019,6 +2020,17 @@ int loop(CommandLineArgs args, const char *argv0) {
                 // Transient confirmation of the frame-skip toggle, top right corner.
                 if (gfx == SOFTWARE && skipBanner[0] != '\0' && nowNanos() < skipBannerUntil) {
                     SWRenderer_drawOverlayTextRight(renderer, 4, 4, 0.28f, skipBanner);
+                }
+
+                // Opt-in draw cost report (BUTTERSCOTCH_PROFILE_DRAWS=1): names the
+                // texture-page items that actually spend the frame's draw time.
+                if (gfx == SOFTWARE && swrDrawProfileEnabled()) {
+                    static uint64_t lastDrawProfileNanos = 0;
+                    uint64_t profileNow = nowNanos();
+                    if (profileNow - lastDrawProfileNanos >= 1000000000ull) {
+                        lastDrawProfileNanos = profileNow;
+                        SWRenderer_reportDrawProfile();
+                    }
                 }
 
                 if (tracingThisFrame && gfx == SOFTWARE) {

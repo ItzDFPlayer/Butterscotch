@@ -352,27 +352,63 @@ void platformSetNextFramebuffer(uint32_t* framebuffer, int width, int height) {
     );
 }
 
-// Copies the finished 16bpp framebuffer into the display surface.
-// SDL_BlitSurface goes through the generic blitter, which on this handheld costs
-// much more than the copy itself (the screen is either a shadow buffer or video
-// memory). Both surfaces are plain 16bpp rows of the same size, so copying row by
-// row is both exact and far cheaper.
+// Converts one row of the renderer's RGB555 pixels to the screen's RGB565.
+//
+// The device panel is RGB565 (f800/07e0/001f), so the framebuffer format does not
+// match the screen and SDL's generic blitter was converting a whole frame per
+// swap - about 13 ms of a 60 ms frame in Cyber World. Red, blue and the top four
+// green bits are a shift away; the sixth green bit is the fifth green bit again.
+static void swrConvertRow565(const uint16_t* src, uint16_t* dst, int width) {
+    int x = 0;
+#if defined(__GNUC__) || defined(__clang__)
+    typedef uint16_t swrRow8 __attribute__((vector_size(16)));
+    const swrRow8 keepRedGreen = {0x7FE0, 0x7FE0, 0x7FE0, 0x7FE0,
+                                  0x7FE0, 0x7FE0, 0x7FE0, 0x7FE0};
+    const swrRow8 greenLow = {0x0200, 0x0200, 0x0200, 0x0200,
+                              0x0200, 0x0200, 0x0200, 0x0200};
+    const swrRow8 keepBlue = {0x001F, 0x001F, 0x001F, 0x001F,
+                              0x001F, 0x001F, 0x001F, 0x001F};
+    for (; x + 8 <= width; x += 8) {
+        swrRow8 v;
+        memcpy(&v, src + x, sizeof(v));
+        swrRow8 out = ((v & keepRedGreen) << 1) | ((v & greenLow) >> 4) | (v & keepBlue);
+        memcpy(dst + x, &out, sizeof(out));
+    }
+#endif
+    for (; x < width; x++) {
+        uint16_t v = src[x];
+        dst[x] = (uint16_t) (((v & 0x7FE0) << 1) | ((v & 0x0200) >> 4) | (v & 0x001F));
+    }
+}
+
 static void swrBlitToScreen(void) {
     if (nextFb == NULL || scr == NULL) return;
 
-    // Only a straight pixel copy when the screen really has our RGB555 layout;
-    // anything else still goes through SDL, which converts per pixel.
     if (nextFb->w == scr->w && nextFb->h == scr->h &&
-        nextFb->format->BitsPerPixel == 16 && scr->format->BitsPerPixel == 16 &&
-        scr->format->Rmask == 0x7C00 && scr->format->Gmask == 0x03E0 &&
-        scr->format->Bmask == 0x001F) {
+        nextFb->format->BitsPerPixel == 16 && scr->format->BitsPerPixel == 16) {
         const uint8_t* src = (const uint8_t*) nextFb->pixels;
         uint8_t* dst = (uint8_t*) scr->pixels;
-        size_t rowBytes = (size_t) nextFb->w * 2;
-        for (int y = 0; y < nextFb->h; y++) {
-            memcpy(dst + (size_t) y * scr->pitch, src + (size_t) y * nextFb->pitch, rowBytes);
+
+        // The screen really has our RGB555 layout: a plain row copy.
+        if (scr->format->Rmask == 0x7C00 && scr->format->Gmask == 0x03E0 &&
+            scr->format->Bmask == 0x001F) {
+            size_t rowBytes = (size_t) nextFb->w * 2;
+            for (int y = 0; y < nextFb->h; y++) {
+                memcpy(dst + (size_t) y * scr->pitch, src + (size_t) y * nextFb->pitch, rowBytes);
+            }
+            return;
         }
-        return;
+
+        // RGB565 screen (what the Miyoo panel uses): convert while copying.
+        if (scr->format->Rmask == 0xF800 && scr->format->Gmask == 0x07E0 &&
+            scr->format->Bmask == 0x001F) {
+            for (int y = 0; y < nextFb->h; y++) {
+                swrConvertRow565((const uint16_t*) (src + (size_t) y * nextFb->pitch),
+                                 (uint16_t*) (dst + (size_t) y * scr->pitch),
+                                 nextFb->w);
+            }
+            return;
+        }
     }
 
     SDL_BlitSurface(nextFb, NULL, scr, NULL);
