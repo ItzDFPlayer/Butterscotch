@@ -61,6 +61,7 @@ static void printUsage(const char *argv0) {
         "    --always-log-stubbed-functions         - Always log stubbed function calls instead of once per script\n"
 #endif
         "    --exit-at-frame <frame>                - Exit at the specified frame\n"
+        "    --trace-frame <frame>                  - Log that frame's draws and on-stage instances\n"
 #ifdef ENABLE_VM_TRACING
         "    --trace-bytecode-after-frame <frame>   - Delay stack and opcode tracing until the specified frame\n"
 #endif
@@ -140,6 +141,7 @@ void parseCommandLineArgs(CommandLineArgs* args, int argc, char* argv[]) {
         {"always-log-stubbed-functions", no_argument, nullptr, 'Y'},
 #endif
         {"exit-at-frame", required_argument, nullptr, 'x'},
+        {"trace-frame", required_argument, nullptr, 1011},
 #ifdef ENABLE_VM_TRACING
         {"trace-bytecode-after-frame", required_argument, nullptr, 'F'},
 #endif
@@ -186,6 +188,7 @@ void parseCommandLineArgs(CommandLineArgs* args, int argc, char* argv[]) {
     args->screenshotFrames = nullptr;
 #endif
     args->exitAtFrame = -1;
+    args->traceFrame = -1;
 #ifdef ENABLE_VM_TRACING
     args->traceBytecodeAfterFrame = 0;
 #endif
@@ -341,6 +344,16 @@ void parseCommandLineArgs(CommandLineArgs* args, int argc, char* argv[]) {
                     exit(1);
                 }
                 args->exitAtFrame = frame;
+                break;
+            }
+            case 1011: {
+                char* endPtr;
+                int frame = strtol(optarg, &endPtr, 10);
+                if (*endPtr != '\0' || 0 > frame) {
+                    logError("Invalid frame number '%s' for --trace-frame\n", optarg);
+                    exit(1);
+                }
+                args->traceFrame = frame;
                 break;
             }
 #ifdef ENABLE_VM_TRACING

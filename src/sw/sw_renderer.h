@@ -41,6 +41,10 @@ uint32_t SWRenderer_estimateTexturePageBytes(Renderer* renderer, int32_t pageId)
 // demand. Prefetching such a page would defeat the memory saving.
 bool SWRenderer_pageIsSubPage(Renderer* renderer, int32_t pageId);
 
+// Turns the per-draw log on or off. Used with --trace-frame: the frame's draws are
+// logged so they can be compared against the instances that were on stage.
+void SWRenderer_setDrawTrace(Renderer* renderer, bool enabled);
+
 // Writes the finished framebuffer to `path` as an RGBA PNG. Used by the debug
 // capture key so a bug can be reported without a screen grabber: the software
 // renderer has no GL readback path, so this is the only way to get the exact

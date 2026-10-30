@@ -279,6 +279,12 @@ bool SWRenderer_prefetchTexturePage(Renderer* renderer, int32_t pageId)
     return swrEnsureTextureIsLoaded(swr, (uint32_t) pageId);
 }
 
+void SWRenderer_setDrawTrace(Renderer* renderer, bool enabled)
+{
+    if (renderer == nullptr) return;
+    ((SWRenderer*) renderer)->traceDraws = enabled ? 1 : 0;
+}
+
 bool SWRenderer_captureFramebuffer(Renderer* renderer, const char* path)
 {
     if (renderer == nullptr || path == nullptr) return false;

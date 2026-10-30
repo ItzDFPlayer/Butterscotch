@@ -142,6 +142,10 @@ typedef struct
     // only used for surfaces.  The application surface doesn't support these at the moment.
     int currentSurfaceIndex;
     int writeMask;
+
+    // When non-zero every draw is written to the log, which is how a scene that
+    // "renders wrong" gets compared against the instances that are on stage.
+    int traceDraws;
 }
 SWRenderer;
 

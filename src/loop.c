@@ -354,6 +354,25 @@ static char* buildGameChangeTargetPath(const char* currentDataWinPath, const cha
 
     free(parentDir);
     return newPath;
+// Logs every instance that is on stage, with the sprite it would draw. Used by
+// --trace-frame and by the F9 capture so a missing sprite can be identified by
+// comparing this list with the draws of the same frame.
+static void logInstances(Runner* runner) {
+    logInfo("TRACE frame %d, room '%s', %d instances\n", runner->frameCount,
+            (runner->currentRoom != nullptr && runner->currentRoom->name != nullptr)
+                ? runner->currentRoom->name : "?",
+            (int) arrlen(runner->instances));
+    repeat(arrlen(runner->instances), ti) {
+        Instance* inst = runner->instances[ti];
+        if (inst == nullptr || !inst->active) continue;
+        int32_t objIndex = inst->objectIndex;
+        logInfo("INST %-32s spr=%4d img=%3d vis=%d a=%.2f blend=%d depth=%d (%.0f,%.0f)\n",
+                (objIndex >= 0 && (uint32_t) objIndex < runner->dataWin->objt.count)
+                    ? runner->dataWin->objt.objects[objIndex].name : "?",
+                inst->spriteIndex, (int) inst->imageIndex, (int) inst->visible,
+                (double) inst->imageAlpha, (int) inst->imageBlend,
+                (int) inst->depth, (double) inst->x, (double) inst->y);
+    }
 }
 
 // ===[ SCREENSHOT ]===
@@ -1767,6 +1786,26 @@ int loop(CommandLineArgs args, const char *argv0) {
                     }
                 }
 
+                // Set by F9: the following frame is traced, which is the frame the
+                // capture itself could not cover (it is already drawn by then).
+                static bool traceNextFrame = false;
+
+                bool tracingThisFrame = args.traceFrame >= 0 && runner->frameCount == args.traceFrame;
+                if (tracingThisFrame) {
+                    logInstances(runner);
+                    if (gfx == SOFTWARE) SWRenderer_setDrawTrace(renderer, true);
+                }
+
+                // --trace-frame, or the frame after an F9 capture: log what is on
+                // stage and then every draw of that frame, so "this sprite is missing"
+                // can be answered with data instead of guesswork.
+                if (traceNextFrame) {
+                    traceNextFrame = false;
+                    logInstances(runner);
+                    if (gfx == SOFTWARE) SWRenderer_setDrawTrace(renderer, true);
+                    tracingThisFrame = true;
+                }
+
                 Runner_drawPre(runner, fbWidth, fbHeight);
 
                 // Calculate viewport (letterboxing) in screen coordinates for mouse mapping
@@ -1786,6 +1825,7 @@ int loop(CommandLineArgs args, const char *argv0) {
                 Runner_drawGUI(runner, fbWidth, fbHeight, gameW, gameH);
                 perfAfterDraw = nowNanos();
 
+<<<<<<< HEAD
                 if (showDebugOverlay && renderer->vtable->drawTextUI != nullptr) {
                     renderer->vtable->beginGUI(renderer, fbWidth, fbHeight, 0, 0, fbWidth, fbHeight, RENDER_TARGET_HOST_FRAMEBUFFER);
 
@@ -1848,11 +1888,19 @@ int loop(CommandLineArgs args, const char *argv0) {
 
                 renderer->vtable->endGUI(renderer);
             }
+=======
+                if (tracingThisFrame && gfx == SOFTWARE) {
+                    SWRenderer_setDrawTrace(renderer, false);
+                    logInfo("TRACE end frame %d\n", runner->frameCount);
+                }
+
+>>>>>>> 768ad6b3 (feat(debug): trace a frame's draws and the instances behind them)
                 // Debug capture: F9 writes the finished frame to a PNG next to the
                 // working directory and drops a marker in the log, so a rendering bug
                 // can be reported from a machine without any screen capture tooling
                 // (the software renderer has no GL readback).
                 if (gfx == SOFTWARE && RunnerKeyboard_checkPressed(runner->keyboard, VK_F9)) {
+                    traceNextFrame = true;
                     char capturePath[256];
                     snprintf(capturePath, sizeof(capturePath), "swshot_%05d.png", runner->frameCount);
                     if (SWRenderer_captureFramebuffer(renderer, capturePath))

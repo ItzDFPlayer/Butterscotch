@@ -106,6 +106,8 @@ typedef struct {
     bool printDeclaredFunctions;
     bool printUnknownFunctions;
     int exitAtFrame;
+    // When >= 0, that frame's draws and on-stage instances are logged.
+    int traceFrame;
 #ifdef ENABLE_VM_TRACING
     int traceBytecodeAfterFrame;
 #endif

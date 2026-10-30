@@ -64,6 +64,30 @@ static void swrDrawSpanEx(SWRenderer* swr, int x, int y, int count, uintpixel_t 
         swrBlitPixelEx(swr, &dstline[i], srcPixel, srcAlpha, maskBits);
 }
 
+// ===[ Draw trace ]===
+//
+// One line per draw, so a frame can be compared against the instances that are on
+// stage: an instance whose sprite never appears here was not drawn at all, which is
+// a very different bug from one that was drawn with the wrong colour or blend.
+static void swrTraceDraw(SWRenderer* swr, const char* kind, const SWTexture* texture,
+                         int sx, int sy, int sw, int sh, int dx, int dy, int dw, int dh,
+                         int alpha, uint32_t tint)
+{
+    if (!UNLIKELY(swr->traceDraws)) return;
+
+    int page = -1;
+    if (texture != nullptr) {
+        for (size_t i = 0; i < swr->textureCount; i++) {
+            if (swr->textures[i] == texture) { page = (int) i; break; }
+        }
+    }
+
+    logInfo("DRAW %-8s page=%2d src=%4d,%4d,%4d,%4d dst=%5d,%5d,%4d,%4d alpha=%3d tint=%04X blend=%d mask=%04X mode=%d surf=%d\n",
+            kind, page, sx, sy, sw, sh, dx, dy, dw, dh, alpha, (unsigned) (tint & 0x7FFF),
+            swr->blendMode, (unsigned) swr->writeMask, swr->pixelMode,
+            swr->drawingToSurface ? swr->currentSurfaceIndex : -1);
+}
+
 // ==== Vectorised fills ====
 //
 // Solid-colour spans are the cheapest thing in the renderer to vectorise and they
@@ -1336,6 +1360,8 @@ void swrFillRectangle(Renderer* renderer, float x1, float y1, float x2, float y2
     if (yd < 0) { y1i = y2i; yd = -yd; }
     if (xd <= 0 || yd <= 0) return;
     
+    swrTraceDraw(swr, "fillrect", nullptr, 0, 0, 0, 0, x1i, y1i, xd, yd, alphaInt, pxcolor);
+
     for (int y = 0; y <= yd; y++) {
         swrDrawHLineInt(renderer, x1i, y1i + y, xd, pxcolor, pxcolor, alphaInt);
     }
@@ -1375,6 +1401,10 @@ void swrDrawSprite(
     swrTransformPosIfNeeded(swr, &dx, &dy);
     swrTransformSizeIfNeeded(swr, &dw, &dh);
     
+    swrTraceDraw(swr, "sprite", texture, sx, sy, sw, sh,
+                 swrFloor(dx), swrFloor(dy), swrCeiling(dw), swrCeiling(dh),
+                 swrIntAlpha(alpha), tintColor);
+
     swrDrawSpriteInternal(
         renderer,
         swrFloor(dx),
@@ -1404,6 +1434,10 @@ void swrDrawSpriteRotated(
     swrTransformSizeIfNeeded(swr, &pivotX, &pivotY);
     swrTransformSizeIfNeeded(swr, &dw, &dh);
     
+    swrTraceDraw(swr, "rotate", texture, sx, sy, sw, sh,
+                 swrFloor(dx), swrFloor(dy), swrCeiling(dw), swrCeiling(dh),
+                 swrIntAlpha(alpha), tintColor);
+
     swrDrawSpriteRotatedInternal(
         renderer,
         swrFloor(dx),
