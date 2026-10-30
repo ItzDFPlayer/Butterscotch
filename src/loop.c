@@ -1607,6 +1607,7 @@ int loop(CommandLineArgs args, const char *argv0) {
             uint64_t frameStartTime = 0;
             uint64_t perfAfterStep = 0;
             uint64_t perfAfterDraw = 0;
+            double perfSwapMs = 0.0;
 
             if (shouldStep) {
                 frameStartTime = nowNanos();
@@ -2095,8 +2096,11 @@ int loop(CommandLineArgs args, const char *argv0) {
 
             // Only present a new frame when we actually rendered one. This includes the first paused frame so the
             // pause overlay can be presented once, and all later paused frames stay frozen without re-swapping.
-            if (runner->pendingRoom == -1 && shouldRender && !skippingDraw)
+            if (runner->pendingRoom == -1 && shouldRender && !skippingDraw) {
+                uint64_t swapStart = nowNanos();
                 platformSwapBuffers();
+                perfSwapMs = (double) (nowNanos() - swapStart) / 1000000.0;
+            }
 
         afterDraw:;
             if (shouldStep) {
@@ -2123,6 +2127,7 @@ int loop(CommandLineArgs args, const char *argv0) {
                     perfFrame.instanceCount = (int) arrlen(runner->instances);
                     perfFrame.stepMs = (double) (perfAfterStep - frameStartTime) / 1000000.0;
                     perfFrame.drawMs = (double) (perfAfterDraw - perfAfterStep) / 1000000.0;
+                    perfFrame.swapMs = perfSwapMs;
                     // deltaTime is the wall time since the previous frame start, in microseconds.
                     perfFrame.frameMs = (double) runner->deltaTime / 1000.0;
                     perfFrame.audioCacheBytes = (uint32_t) runner->dataWin->audoOwnedBytes;

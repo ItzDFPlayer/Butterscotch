@@ -23,6 +23,7 @@ typedef struct {
     int instanceCount;
     double stepMs;           // Runner_step: GML event execution
     double drawMs;           // view / post / GUI drawing
+    double swapMs;           // presenting the finished frame (blit + SDL_Flip)
     double frameMs;          // wall time since the previous frame start (includes waiting)
     uint32_t textureBytes;   // decoded texture cache currently resident
     uint32_t textureBudgetBytes;

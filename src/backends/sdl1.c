@@ -322,6 +322,11 @@ void platformInitFunctions(Runner *runner) {
 static SDL_Surface* nextFb = NULL;
 
 void platformSetNextFramebuffer(uint32_t* framebuffer, int width, int height) {
+    // Called once per frame with the same buffer, so only rebuild the wrapper when
+    // the buffer or its geometry actually changed.
+    if (nextFb && nextFb->pixels == (void*) framebuffer && nextFb->w == width && nextFb->h == height)
+        return;
+
     if (nextFb) {
         SDL_FreeSurface(nextFb);
         nextFb = NULL;
@@ -340,6 +345,32 @@ void platformSetNextFramebuffer(uint32_t* framebuffer, int width, int height) {
     );
 }
 
+// Copies the finished 16bpp framebuffer into the display surface.
+// SDL_BlitSurface goes through the generic blitter, which on this handheld costs
+// much more than the copy itself (the screen is either a shadow buffer or video
+// memory). Both surfaces are plain 16bpp rows of the same size, so copying row by
+// row is both exact and far cheaper.
+static void swrBlitToScreen(void) {
+    if (nextFb == NULL || scr == NULL) return;
+
+    // Only a straight pixel copy when the screen really has our RGB555 layout;
+    // anything else still goes through SDL, which converts per pixel.
+    if (nextFb->w == scr->w && nextFb->h == scr->h &&
+        nextFb->format->BitsPerPixel == 16 && scr->format->BitsPerPixel == 16 &&
+        scr->format->Rmask == 0x7C00 && scr->format->Gmask == 0x03E0 &&
+        scr->format->Bmask == 0x001F) {
+        const uint8_t* src = (const uint8_t*) nextFb->pixels;
+        uint8_t* dst = (uint8_t*) scr->pixels;
+        size_t rowBytes = (size_t) nextFb->w * 2;
+        for (int y = 0; y < nextFb->h; y++) {
+            memcpy(dst + (size_t) y * scr->pitch, src + (size_t) y * nextFb->pitch, rowBytes);
+        }
+        return;
+    }
+
+    SDL_BlitSurface(nextFb, NULL, scr, NULL);
+}
+
 #endif
 
 void platformSwapBuffers(void) {
@@ -347,7 +378,18 @@ void platformSwapBuffers(void) {
     if(gfx == SOFTWARE) {
         if (!scr)
             return;
-        SDL_BlitSurface(nextFb, NULL, scr, NULL);
+        // One line about the display surface: whether the screen is a shadow buffer
+        // or video memory decides how expensive presenting a frame can be.
+        static bool reportedScreen = false;
+        if (!reportedScreen) {
+            reportedScreen = true;
+            logInfo("Video: screen %dx%d %dbpp, pitch %d, masks %04x/%04x/%04x, %s\n",
+                    scr->w, scr->h, scr->format->BitsPerPixel, scr->pitch,
+                    (unsigned) scr->format->Rmask, (unsigned) scr->format->Gmask,
+                    (unsigned) scr->format->Bmask,
+                    (scr->flags & SDL_HWSURFACE) ? "video memory" : "shadow buffer");
+        }
+        swrBlitToScreen();
         SDL_Flip(scr);
     }
 #endif

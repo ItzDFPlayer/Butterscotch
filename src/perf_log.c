@@ -34,6 +34,7 @@ struct PerfLog {
     int beatFrames;
     double beatSumStep;
     double beatSumDraw;
+    double beatSumSwap;
     double beatMaxFrame;
     uint32_t beatLastLoads;
     uint32_t beatLastEvict;
@@ -51,6 +52,8 @@ struct PerfLog {
 
     double sumStep;
     double sumDraw;
+    double sumSwap;
+    double maxSwap;
     double sumFrame;
     double maxStep;
     double maxDraw;
@@ -134,16 +137,17 @@ static bool perfCanWrite(PerfLog* log) {
 }
 
 static void perfWriteFrameLine(PerfLog* log, const char* type, const PerfLogFrame* frame,
-                               double stepMs, double drawMs, double frameMs) {
+                               double stepMs, double drawMs, double swapMs, double frameMs) {
     if (!perfCanWrite(log))
         return;
     fprintf(log->f,
-            "%s\t%d\t%s\t%.2f\t%.2f\t%.2f\t%.1f\t%.1f\t%u\t%u\t%.1f\t%.1f\t%d\n",
+            "%s\t%d\t%s\t%.2f\t%.2f\t%.2f\t%.2f\t%.1f\t%.1f\t%u\t%u\t%.1f\t%.1f\t%d\n",
             type,
             frame->frame,
             perfRoomName(frame),
             stepMs,
             drawMs,
+            swapMs,
             frameMs,
             frame->textureBytes / (1024.0 * 1024.0),
             frame->textureBudgetBytes / (1024.0 * 1024.0),
@@ -173,8 +177,10 @@ PerfLog* PerfLog_open(const char* path, int slowFrameMs) {
     fprintf(f, "# slow-frame threshold: %d ms\n", log->slowFrameMs);
     fputs("# Sent with a bug report: frames that spike, room changes, heartbeats\n", f);
     fputs("# and any GML scripts that were running during a spike.\n", f);
-    fputs("# columns: type frame room step_ms draw_ms frame_ms tex_mb budget_mb"
+    fputs("# columns: type frame room step_ms draw_ms swap_ms frame_ms tex_mb budget_mb"
           " tex_loads tex_evict audio_mb rss_mb instances\n", f);
+    fputs("#   swap_ms = presenting the frame (blit to the display surface + SDL_Flip);\n", f);
+    fputs("#             frame_ms minus step/draw/swap is the frame pacing wait\n", f);
     fputs("#   beat = heartbeat every 60 frames (averages of that window)\n", f);
     fputs("#   slow = a frame slower than the threshold\n", f);
     fputs("#   room = room change\n", f);
@@ -226,6 +232,7 @@ bool PerfLog_frame(PerfLog* log, const PerfLogFrame* frame) {
     log->frameCount++;
     log->sumStep += frame->stepMs;
     log->sumDraw += frame->drawMs;
+    log->sumSwap += frame->swapMs;
     log->sumFrame += frame->frameMs;
     log->lastTextureLoads = frame->textureLoads;
     log->lastTextureEvict = frame->textureEvictions;
@@ -234,6 +241,7 @@ bool PerfLog_frame(PerfLog* log, const PerfLogFrame* frame) {
 
     if (frame->stepMs > log->maxStep) log->maxStep = frame->stepMs;
     if (frame->drawMs > log->maxDraw) log->maxDraw = frame->drawMs;
+    if (frame->swapMs > log->maxSwap) log->maxSwap = frame->swapMs;
     if (frame->frameMs > log->maxFrame) log->maxFrame = frame->frameMs;
 
     perfHistAdd(log->histStep, frame->stepMs);
@@ -252,7 +260,7 @@ bool PerfLog_frame(PerfLog* log, const PerfLogFrame* frame) {
         if (frame->frameMs >= 500.0)
             log->hitchOver500++;
 
-        perfWriteFrameLine(log, "slow", frame, frame->stepMs, frame->drawMs, frame->frameMs);
+        perfWriteFrameLine(log, "slow", frame, frame->stepMs, frame->drawMs, frame->swapMs, frame->frameMs);
 
         // Keep the slowest frames for the summary.
         const char* room = perfRoomName(frame);
@@ -278,11 +286,13 @@ bool PerfLog_frame(PerfLog* log, const PerfLogFrame* frame) {
     log->beatFrames++;
     log->beatSumStep += frame->stepMs;
     log->beatSumDraw += frame->drawMs;
+    log->beatSumSwap += frame->swapMs;
     if (frame->frameMs > log->beatMaxFrame)
         log->beatMaxFrame = frame->frameMs;
     if (log->beatFrames >= PERF_BEAT_EVERY) {
         double n = (double) log->beatFrames;
-        perfWriteFrameLine(log, "beat", frame, log->beatSumStep / n, log->beatSumDraw / n, log->beatMaxFrame);
+        perfWriteFrameLine(log, "beat", frame, log->beatSumStep / n, log->beatSumDraw / n,
+                           log->beatSumSwap / n, log->beatMaxFrame);
         // Texture churn is only meaningful as a delta over the window.
         if (frame->textureLoads != log->beatLastLoads || frame->textureEvictions != log->beatLastEvict)
             PerfLog_note(log, "tex pages in window %d-%d: %llu loaded, %llu evicted (cache %.1f/%.1f MB)",
@@ -347,7 +357,7 @@ bool PerfLog_frame(PerfLog* log, const PerfLogFrame* frame) {
 void PerfLog_roomChange(PerfLog* log, const PerfLogFrame* frame) {
     if (log == NULL || frame == NULL)
         return;
-    perfWriteFrameLine(log, "room", frame, frame->stepMs, frame->drawMs, frame->frameMs);
+    perfWriteFrameLine(log, "room", frame, frame->stepMs, frame->drawMs, frame->swapMs, frame->frameMs);
 }
 
 void PerfLog_summary(PerfLog* log) {
@@ -373,6 +383,8 @@ void PerfLog_summary(PerfLog* log) {
                 log->sumStep / count, stepP50, stepP95, log->maxStep);
         fprintf(log->f, "# draw ms : avg=%.2f p50=%d p95=%d max=%.2f\n",
                 log->sumDraw / count, drawP50, drawP95, log->maxDraw);
+        fprintf(log->f, "# swap ms : avg=%.2f max=%.2f\n",
+                log->sumSwap / count, log->maxSwap);
         fprintf(log->f, "# frame ms: avg=%.2f p50=%d p95=%d max=%.2f\n",
                 log->sumFrame / count, frameP50, frameP95, log->maxFrame);
     }
