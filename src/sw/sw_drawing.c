@@ -69,11 +69,15 @@ static void swrDrawSpanEx(SWRenderer* swr, int x, int y, int count, uintpixel_t 
 // One line per draw, so a frame can be compared against the instances that are on
 // stage: an instance whose sprite never appears here was not drawn at all, which is
 // a very different bug from one that was drawn with the wrong colour or blend.
+// Every draw is logged when the frame trace is on, and when BUTTERSCOTCH_LOG_BLEND is
+// set while drawing into a surface: surface-offscreen passes are where the effect
+// state lives, and logging all of them costs a handful of lines while logging every
+// draw of a busy room would bury the log.
 static void swrTraceDraw(SWRenderer* swr, const char* kind, const SWTexture* texture,
                          int sx, int sy, int sw, int sh, int dx, int dy, int dw, int dh,
                          int alpha, uint32_t tint)
 {
-    if (!UNLIKELY(swr->traceDraws)) return;
+    if (!swr->traceDraws && !(swr->drawingToSurface && swrDiagLogEnabled())) return;
 
     int page = -1;
     if (texture != nullptr) {
@@ -1247,8 +1251,9 @@ bool swrSwitchToSurface(Renderer* renderer, int32_t targetSurfaceId, bool restor
         if (!swr->drawingToSurface)
             return true;
         
-        // restore the original framebuffer
-        swr->drawingToSurface = false;
+        if (swrDiagLogEnabled())
+            logInfo("Surf target   screen (from %d)\n", (int) swr->currentSurfaceIndex);
+        
         swr->fb = swr->mainFb;
         swr->width = swr->mainWidth;
         swr->height = swr->mainHeight;
@@ -1285,6 +1290,14 @@ bool swrSwitchToSurface(Renderer* renderer, int32_t targetSurfaceId, bool restor
     if (targetSurfaceId < 0 || (size_t) targetSurfaceId >= swr->surfaceCount || swr->surfaces[targetSurfaceId] == NULL) {
         fprintf(stderr, "swr: Invalid surface id %d\n", targetSurfaceId);
         return false;
+    }
+
+    if (swrDiagLogEnabled()) {
+        SWTexture* t = swr->surfaces[targetSurfaceId]->texture;
+        logInfo("Surf target   id=%d %dx%d view=%.0f,%.0f %.0fx%.0f port=%d,%d %dx%d scale=%.2f,%.2f\n",
+                (int) targetSurfaceId, (int) t->width, (int) t->height,
+                swr->viewX, swr->viewY, swr->viewW, swr->viewH,
+                swr->portX, swr->portY, swr->portW, swr->portH, swr->scaleX, swr->scaleY);
     }
     
     if (!swr->drawingToSurface)

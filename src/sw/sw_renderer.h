@@ -45,6 +45,12 @@ bool SWRenderer_pageIsSubPage(Renderer* renderer, int32_t pageId);
 // logged so they can be compared against the instances that were on stage.
 void SWRenderer_setDrawTrace(Renderer* renderer, bool enabled);
 
+// True when BUTTERSCOTCH_LOG_BLEND is set. Gates the draw-state log (blend mode and
+// factors, colour write mask, pixel mode) and the surface pipeline log (create,
+// target, clear, composite, plus every draw made into a surface), which together
+// describe an effect that renders as a flat colour or a missing layer.
+int swrDiagLogEnabled(void);
+
 // Draws a short debug string (fps, memory) straight into the framebuffer using the
 // built-in 8x8 debug font, with a one-pixel shadow so it stays readable over any
 // scene. `scale` is 0..1 of the font's natural size; 0.25 gives readable 11px text

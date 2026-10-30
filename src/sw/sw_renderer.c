@@ -973,6 +973,26 @@ static void SWRenderer_flush(Renderer* renderer)
     UNIMP();
 }
 
+// ====[ Draw state logging ]====
+//
+// BUTTERSCOTCH_LOG_BLEND=1 prints the GPU state the moment it changes, plus every
+// draw that lands in a surface and every surface composite. Deltarune builds its
+// overworld effects (damage veil, layer highlight, spotlight masks) out of
+// gpu_set_blendmode[_ext], gpu_set_colorwriteenable and surfaces, and none of that
+// is visible in a draw list: the same sprite draws white or darkens the room purely
+// by the state it is drawn with. Only transitions and surface work are logged, so a
+// normal room is a handful of lines.
+int swrDiagLogEnabled(void)
+{
+    static int enabled = -1;
+    if (enabled < 0) {
+        const char* env = getenv("BUTTERSCOTCH_LOG_BLEND");
+        enabled = (env != nullptr && env[0] != '\0' && env[0] != '0') ? 1 : 0;
+        if (enabled) logInfo("Blend/surface log enabled\n");
+    }
+    return enabled;
+}
+
 static void SWRenderer_clearScreen(Renderer* renderer, uint32_t color, float alpha)
 {
     SWRenderer* swr = (SWRenderer*) renderer;
@@ -996,6 +1016,10 @@ static void SWRenderer_clearScreen(Renderer* renderer, uint32_t color, float alp
     #endif
     }
 #endif
+
+    if (swr->drawingToSurface && swrDiagLogEnabled())
+        logInfo("Surf clear    target=%d color=%06X alpha=%.3f -> %04X\n",
+                swr->currentSurfaceIndex, (unsigned) (color & 0xFFFFFF), alpha, (unsigned) color);
     
     for (int y = 0; y < swr->height; y++) {
         uintpixel_t* line = &swr->fb[y * swr->fbPitch];
@@ -1006,26 +1030,12 @@ static void SWRenderer_clearScreen(Renderer* renderer, uint32_t color, float alp
 }
 
 // ====[ Blend state logging ]====
-//
-// BUTTERSCOTCH_LOG_BLEND=1 prints the draw state the moment it changes, which is how
-// an effect that "renders wrong" gets identified: Deltarune's overworld damage veil
-// is built out of gpu_set_blendmode[_ext] plus gpu_set_colorwriteenable, and which
-// of those the game actually asks for decides whether the veil should darken the
-// scene (subtract), replace it (blendenable false) or leave it alone (alpha-only
-// write mask). Only state transitions are logged, so a full room is a handful of
-// lines rather than one per draw.
 static void swrLogBlendState(SWRenderer* swr, const char* source)
 {
-    static int enabled = -1;
     static unsigned lastKey = 0;
     static bool haveLast = false;
 
-    if (enabled < 0) {
-        const char* env = getenv("BUTTERSCOTCH_LOG_BLEND");
-        enabled = (env != nullptr && env[0] != '\0' && env[0] != '0') ? 1 : 0;
-        if (enabled) logInfo("Blend log enabled\n");
-    }
-    if (!enabled) return;
+    if (!swrDiagLogEnabled()) return;
 
     unsigned key = ((unsigned) (swr->blendEnabled ? 1u : 0u) << 24)
                  | ((unsigned) (swr->blendMode & 0xF) << 20)
@@ -1173,6 +1183,8 @@ static int32_t SWRenderer_createSurface(Renderer* renderer, int32_t width, int32
     }
     
     swr->surfaces[slot] = swrCreateSurface(width, height);
+    if (swrDiagLogEnabled())
+        logInfo("Surf create   id=%d %dx%d\n", (int) slot, width, height);
     return slot;
 }
 
@@ -1234,6 +1246,14 @@ static void SWRenderer_drawSurface(Renderer* renderer, int32_t surfaceID,
 
         swrCommitShadowWritesToSurfaceIfNeeded(swr, swr->surfaces[surfaceID]);
         surface = swr->surfaces[surfaceID]->texture;
+    }
+
+    if (swrDiagLogEnabled()) {
+        logInfo("Surf draw     src=%d srcRect=%d,%d,%dx%d dst=%.1f,%.1f scale=%.2f,%.2f angle=%.1f "
+                "tint=%06X alpha=%.3f blend=%d mode=%d to=%d\n",
+                (int) surfaceID, srcLeft, srcTop, srcWidth, srcHeight, x, y, xscale, yscale,
+                angleDeg, (unsigned) (color & 0xFFFFFF), alpha, swr->blendMode, swr->pixelMode,
+                swr->drawingToSurface ? swr->currentSurfaceIndex : -1);
     }
     
     if (srcWidth < 0) {
