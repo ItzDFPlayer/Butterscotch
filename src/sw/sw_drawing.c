@@ -883,7 +883,48 @@ static void swrDrawSpriteInternal(
     else
     {
         swr->pxWritten += (uint64_t) dw * (uint64_t) dh;
-        if (!plainCopy) swr->pxScalarBlend += (uint64_t) dw * (uint64_t) dh;
+
+        // A scaled draw of an untinted, fully opaque sprite only has to move the
+        // source pixel across. This used to fall through to alphaBlend() per pixel,
+        // which is why the Cyber World parallax layers - roughly 40% of that room's
+        // pixels, drawn as scaled sprite parts - cost about 15 ns each.
+        if (plainCopy)
+        {
+            swr->pxFastCopy += (uint64_t) dw * (uint64_t) dh;
+
+            const bool unitXStep = (oxs2 == (fixedp_t) (1 << fp_prec));
+            fixedp_t ys2 = iys2;
+            for (int y = 0, ys = iys; y < dh; y++, ys += oys, ys2 += oys2)
+            {
+                uintpixel_t* dstline = &swr->fb[(dy + y) * swr->fbPitch + dx];
+                const uintpixel_t* srcline;
+                if (dh == sh)
+                    srcline = &texture->buffer[(sy + ys) * texture->width + sx];
+                else
+                    srcline = &texture->buffer[(sy + (int)(ys2 >> fp_prec)) * texture->width + sx];
+
+                if (unitXStep)
+                {
+                    // Whole pixels across: the row is a run, transparent holes included.
+                    const int xoff = (int) (ixs2 >> fp_prec);
+                    if (xoff >= 0 && xoff + dw <= (int) texture->width)
+                    {
+                        swrCopyRunOpaque(dstline, srcline + xoff, dw);
+                        continue;
+                    }
+                }
+
+                fixedp_t xs2 = ixs2;
+                for (int x = 0; x < dw; x++, xs2 += oxs2)
+                {
+                    uintpixel_t pixel = srcline[(int)(xs2 >> fp_prec)];
+                    if (opaque(pixel)) dstline[x] = pixel;
+                }
+            }
+            return;
+        }
+
+        swr->pxScalarBlend += (uint64_t) dw * (uint64_t) dh;
 
         fixedp_t ys2 = iys2;
         for (int y = 0, ys = iys; y < dh; y++, ys += oys, ys2 += oys2)

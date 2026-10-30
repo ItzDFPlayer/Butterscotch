@@ -104,8 +104,8 @@ void SWRenderer_reportDrawProfile(void) {
         if (best < 0) break;
 
         SwrDrawProfileEntry* e = &sProfile[best];
-        logInfo("  %-7s %5d  %7.2f ms  %6.2f us/draw  %5.1fK px/draw\n",
-                swrDrawKindName(e->kind), e->key, (double) e->nanos / 1e6,
+        logInfo("  %-7s %5d  %5u x  %7.2f ms  %6.2f us/draw  %5.1fK px/draw\n",
+                swrDrawKindName(e->kind), e->key, e->draws, (double) e->nanos / 1e6,
                 (double) e->nanos / 1e3 / (double) e->draws,
                 e->draws > 0 ? (double) e->pixels / (double) e->draws / 1024.0 : 0.0);
         e->draws = 0; // consumed, so the next rank search skips it

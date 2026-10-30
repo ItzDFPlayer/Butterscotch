@@ -10,6 +10,10 @@
 #include "sw_renderer_private.h"
 #include "sw_draw_profile.h"
 
+// Set by the draw entries once they know the destination size, read by the timing
+// wrappers below: the alternative is threading an out-parameter through every blit.
+static int sProfileLastPixels;
+
 void platformSetNextFramebuffer(uintpixel_t* framebuffer, int width, int height);
 void platformSwapBuffers(void);
 
@@ -519,7 +523,7 @@ static bool swrDestIsOffscreen(SWRenderer* swr, float dx, float dy, float dw, fl
 
     return offscreen;
 }
-static void SWRenderer_drawSprite(Renderer* renderer, int32_t tpagIndex, float x, float y,
+static void swrDrawSpriteEntry(Renderer* renderer, int32_t tpagIndex, float x, float y,
                                   float originX, float originY, float xscale, float yscale,
                                   float angleDeg, uint32_t color, float alpha)
 {
@@ -573,7 +577,7 @@ static void SWRenderer_drawSprite(Renderer* renderer, int32_t tpagIndex, float x
     dy += y;
 
     SWTexture* texture = swr->textures[pageId];
-    uint64_t profStart = swrDrawProfileBegin();
+    sProfileLastPixels = dw * dh;
 
     if (UNLIKELY(swrMustRotate(angleDeg)))
     {
@@ -591,11 +595,9 @@ static void SWRenderer_drawSprite(Renderer* renderer, int32_t tpagIndex, float x
     {
         swrDrawSprite(renderer, dx, dy, dw, dh, texture, sx, sy, sw, sh, color, alpha);
     }
-
-    swrDrawProfileEnd(SWR_DRAW_SPRITE, tpagIndex, dw * dh, profStart);
 }
 
-static void SWRenderer_drawSpritePart(Renderer* renderer, int32_t tpagIndex,
+static void swrDrawSpritePartEntry(Renderer* renderer, int32_t tpagIndex,
                                       float srcOffX, float srcOffY, float srcW, float srcH,
                                       float x, float y, float xscale, float yscale, float angleDeg,
                                       float pivotX, float pivotY, uint32_t color, float alpha)
@@ -642,7 +644,7 @@ static void SWRenderer_drawSpritePart(Renderer* renderer, int32_t tpagIndex,
     }
     
     SWTexture* texture = swr->textures[pageId];
-    uint64_t profStart = swrDrawProfileBegin();
+    sProfileLastPixels = dw * dh;
 
     if (UNLIKELY(swrMustRotate(angleDeg)))
     {
@@ -652,8 +654,6 @@ static void SWRenderer_drawSpritePart(Renderer* renderer, int32_t tpagIndex,
     {
         swrDrawSprite(renderer, dx, dy, dw, dh, texture, sx, sy, sw, sh, color, alpha);
     }
-
-    swrDrawProfileEnd(SWR_DRAW_SPRITE_PART, tpagIndex, dw * dh, profStart);
 }
 
 // draw_sprite_pos(): the sprite's source rectangle mapped onto four arbitrary
@@ -794,6 +794,28 @@ static void SWRenderer_drawTextColor(Renderer* renderer, const char* text, float
     (void) c4;
     
     swrDrawText(swr, text, x, y, xscale, yscale, angleDeg, c1, renderer->drawAlpha, lineSeparation);
+}
+
+// Timed wrappers: the profiler has to see the whole call, off-screen rejection
+// included, because a draw that is culled is still a draw the game paid for.
+static void SWRenderer_drawSprite(Renderer* renderer, int32_t tpagIndex, float x, float y,
+                                  float originX, float originY, float xscale, float yscale,
+                                  float angleDeg, uint32_t color, float alpha) {
+    uint64_t profStart = swrDrawProfileBegin();
+    sProfileLastPixels = 0;
+    swrDrawSpriteEntry(renderer, tpagIndex, x, y, originX, originY, xscale, yscale, angleDeg, color, alpha);
+    swrDrawProfileEnd(SWR_DRAW_SPRITE, tpagIndex, sProfileLastPixels, profStart);
+}
+
+static void SWRenderer_drawSpritePart(Renderer* renderer, int32_t tpagIndex,
+                                      float srcOffX, float srcOffY, float srcW, float srcH,
+                                      float x, float y, float xscale, float yscale, float angleDeg,
+                                      float pivotX, float pivotY, uint32_t color, float alpha) {
+    uint64_t profStart = swrDrawProfileBegin();
+    sProfileLastPixels = 0;
+    swrDrawSpritePartEntry(renderer, tpagIndex, srcOffX, srcOffY, srcW, srcH, x, y,
+                           xscale, yscale, angleDeg, pivotX, pivotY, color, alpha);
+    swrDrawProfileEnd(SWR_DRAW_SPRITE_PART, tpagIndex, sProfileLastPixels, profStart);
 }
 
 static void SWRenderer_drawSpriteTiled(Renderer* renderer, int32_t tpagIndex,
