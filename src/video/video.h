@@ -61,4 +61,7 @@ struct VideoDecoder {
 // Returns NULL when this build has no video decoder.
 VideoDecoder* VideoDecoder_createBackend(void);
 
+// Drains queued asynchronous video events. The runner calls this once per frame.
+void Video_executePendingAsyncEvents(struct Runner* runner);
+
 #endif // _BS_VIDEO_H_

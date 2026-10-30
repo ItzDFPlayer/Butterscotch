@@ -109,6 +109,10 @@ static void printUsage(const char *argv0) {
         "    BUTTERSCOTCH_LOG_KEYS=1               - Log what key each physical button sends\n"
         "    BUTTERSCOTCH_OVERLAY_KEY=<code>       - GML key code that toggles the overlay\n"
         "    BUTTERSCOTCH_FRAMESKIP_KEY=<code>     - GML key code that toggles frame skipping\n"
+        "    BUTTERSCOTCH_CAPTURE_KEY=<code>       - GML key code that captures the frame (default 120 = F9)\n"
+        "    BUTTERSCOTCH_LOG_VIDEO=1              - Log a video decoder status line every second\n"
+        "    BUTTERSCOTCH_VIDEO_SCALE=<px>         - Scale video down to this width (0 = the file's own size)\n"
+        "    BUTTERSCOTCH_VIDEO_THREADS=<n>        - Video decoder threads (default 1)\n"
 #endif
         "    --disable-log-colours                  - Disable colours for warning, error, and debug logs\n"
         "    --disable-log-colors                   - Same as --disable-log-colours, but different spelling\n"

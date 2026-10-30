@@ -403,6 +403,8 @@ static char* buildGameChangeTargetPath(const char* currentDataWinPath, const cha
 
     free(parentDir);
     return newPath;
+}
+
 // Logs every instance that is on stage, with the sprite it would draw. Used by
 // --trace-frame and by the F9 capture so a missing sprite can be identified by
 // comparing this list with the draws of the same frame.

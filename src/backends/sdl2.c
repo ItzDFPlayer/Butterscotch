@@ -15,7 +15,6 @@
 #ifdef ENABLE_SW_RENDERER
 #include "sw/pixel_convert.h"
 #endif
-#endif
 
 static Runner *g_runner;
 static SDL_Surface* scr;
