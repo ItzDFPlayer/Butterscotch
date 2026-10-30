@@ -102,6 +102,10 @@ static void printUsage(const char *argv0) {
         "    Start + L2 (or F7)                    - Toggle the fps/memory overlay\n"
         "    Start + R2 (or F8)                    - Toggle adaptive frame skipping\n"
         "    F9                                    - Save the current frame as a PNG and log its draws\n"
+        "\n"
+        "  Environment:\n"
+        "    BUTTERSCOTCH_PERF_OVERLAY=1           - Start with the fps/memory overlay on\n"
+        "    BUTTERSCOTCH_FRAMESKIP=1              - Start with adaptive frame skipping on\n"
 #endif
         "    --disable-log-colours                  - Disable colours for warning, error, and debug logs\n"
         "    --disable-log-colors                   - Same as --disable-log-colours, but different spelling\n"

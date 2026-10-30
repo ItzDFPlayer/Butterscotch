@@ -117,6 +117,15 @@ static bool gamepadStartComboPressed(Runner* runner, int32_t button) {
     return false;
 }
 
+// Environment flags follow the rest of the port: unset, empty or "0" means off,
+// anything else means on. Lets the launcher switch the debug toggles on for a run
+// without needing a pad combo (the port folder ships no gamecontrollerdb.txt, so
+// on the handheld there are no pad buttons to combine in the first place).
+static bool envFlagSet(const char* name) {
+    const char* value = getenv(name);
+    return value != nullptr && value[0] != '\0' && value[0] != '0';
+}
+
 static size_t get_used_memory(void) {
 #if defined(__linux__)
     {
@@ -1500,10 +1509,13 @@ int loop(CommandLineArgs args, const char *argv0) {
         // behind the loading bar, instead of stalling inside the first draw calls.
         const Room* prefetchLastRoom = nullptr;
 
-        // Runtime toggles: Menu+L2 shows the fps/memory overlay, Menu+R2 enables
-        // adaptive frame skipping. F7/F8 do the same on a keyboard.
-        bool showPerfOverlay = false;
-        bool frameSkipEnabled = false;
+        // Runtime toggles: Start+L2 shows the fps/memory overlay, Start+R2 enables
+        // adaptive frame skipping. F7/F8 do the same on a keyboard. Both can also be
+        // turned on from the launcher with BUTTERSCOTCH_PERF_OVERLAY=1 /
+        // BUTTERSCOTCH_FRAMESKIP=1, which is the only way in when the port folder has
+        // no gamecontrollerdb.txt and therefore no pad buttons to combine.
+        bool showPerfOverlay = envFlagSet("BUTTERSCOTCH_PERF_OVERLAY");
+        bool frameSkipEnabled = envFlagSet("BUTTERSCOTCH_FRAMESKIP");
         bool captureRequested = false;
         bool traceRequested = false;
         // Set when this iteration deliberately draws nothing (adaptive frame skip).
@@ -1515,6 +1527,9 @@ int loop(CommandLineArgs args, const char *argv0) {
         double overlayFps = 0.0;
         double overlayFrameMs = 0.0;
         uint32_t overlayMemBytes = 0;
+
+        if (showPerfOverlay) logInfo("Overlay: on at boot (BUTTERSCOTCH_PERF_OVERLAY)\n");
+        if (frameSkipEnabled) logInfo("Frame skip: on at boot (BUTTERSCOTCH_FRAMESKIP)\n");
 
         while (true) {
             if (runner->shouldExit || shouldWindowClose) {
