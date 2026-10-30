@@ -144,6 +144,9 @@ static void SWRenderer_beginFrame(Renderer* renderer, int32_t gameW, int32_t gam
     swr->gameW = gameW;
     swr->gameH = gameH;
     swr->drawingToSurface = false;
+    // The frame always starts on the host framebuffer, so the remembered target must
+    // not survive into it: a stale id would be indexed on the next surface switch.
+    swr->currentSurfaceIndex = -1;
     swr->blendMode = bm_normal;
     // GameMaker resets the blend unit at the start of every frame; the mask
     // scripts depend on that, otherwise their alpha-only writes leak into the
@@ -178,7 +181,7 @@ static void SWRenderer_endFrameInit(Renderer* renderer)
 static void SWRenderer_endFrameEnd(Renderer* renderer)
 {
     SWRenderer* swr = (SWRenderer*) renderer;
-    assert(!swr->drawingToSurface);
+    assert(!swrIsOnSurface(swr));
     platformSetNextFramebuffer(swr->fb, swr->width, swr->height);
 }
 
@@ -373,7 +376,7 @@ static void SWRenderer_beginView(Renderer* renderer, int32_t viewX, int32_t view
     
     int offsetX = 0, offsetY = 0;
     
-    if (swr->drawingToSurface) {
+    if (swrIsOnSurface(swr)) {
         UNIMP();
         xratio = 1.0f;
         yratio = 1.0f;
@@ -1017,7 +1020,7 @@ static void SWRenderer_clearScreen(Renderer* renderer, uint32_t color, float alp
     }
 #endif
 
-    if (swr->drawingToSurface && swrDiagLogEnabled())
+    if (swrIsOnSurface(swr) && swrDiagLogEnabled())
         logInfo("Surf clear    target=%d color=%06X alpha=%.3f -> %04X\n",
                 swr->currentSurfaceIndex, (unsigned) (color & 0xFFFFFF), alpha, (unsigned) color);
     
@@ -1047,10 +1050,10 @@ static void swrLogBlendState(SWRenderer* swr, const char* source)
     haveLast = true;
     lastKey = key;
 
-    logInfo("Blend %-14s enabled=%d mode=%d src=%d dst=%d mask=%X -> pixelMode=%d %s\n",
+    logInfo("Blend %-14s enabled=%d mode=%d src=%d dst=%d mask=%X -> pixelMode=%d %s swr=%p\n",
             source, swr->blendEnabled ? 1 : 0, swr->blendMode,
             swr->blendSrcFactor, swr->blendDstFactor, swr->writeMask, swr->pixelMode,
-            swr->drawingToSurface ? "surface" : "screen");
+            swrIsOnSurface(swr) ? "surface" : "screen", (void*) swr);
 }
 
 static void SWRenderer_gpuSetBlendMode(Renderer* renderer, int32_t mode)
@@ -1120,7 +1123,7 @@ static void SWRenderer_gpuSetColorWriteEnable(Renderer* renderer, bool red, bool
     swrSetupBlendState(swr);
     swrLogBlendState(swr, "set_colorwrite");
 
-    if (!swr->drawingToSurface) {
+    if (!swrIsOnSurface(swr)) {
         // Nothing else to do: the draw routines apply the mask per pixel.
         return;
     }
@@ -1206,7 +1209,7 @@ static float SWRenderer_getSurfaceWidth(Renderer* renderer, int32_t surfaceID)
 {
     SWRenderer* swr = (SWRenderer*) renderer;
     if (surfaceID == APPLICATION_SURFACE_ID)
-        return (float)(int)((swr->drawingToSurface ? swr->mainWidth : swr->width) / swr->scaleX);
+        return (float)(int)((swrIsOnSurface(swr) ? swr->mainWidth : swr->width) / swr->scaleX);
     
     if (surfaceID < 0 || (size_t) surfaceID >= swr->surfaceCount || swr->surfaces[surfaceID] == NULL)
         return 0.0f;
@@ -1218,7 +1221,7 @@ static float SWRenderer_getSurfaceHeight(Renderer* renderer, int32_t surfaceID)
 {
     SWRenderer* swr = (SWRenderer*) renderer;
     if (surfaceID == APPLICATION_SURFACE_ID) 
-        return (float)(int)((swr->drawingToSurface ? swr->mainHeight : swr->height) / swr->scaleY);
+        return (float)(int)((swrIsOnSurface(swr) ? swr->mainHeight : swr->height) / swr->scaleY);
     
     if (surfaceID < 0 || (size_t) surfaceID >= swr->surfaceCount || swr->surfaces[surfaceID] == NULL)
         return 0.0f;
@@ -1234,9 +1237,9 @@ static void SWRenderer_drawSurface(Renderer* renderer, int32_t surfaceID,
     SWRenderer* swr = (SWRenderer*) renderer;
     SWTexture* surface, localSurface;
     if (surfaceID == APPLICATION_SURFACE_ID) {
-        localSurface.buffer = swr->drawingToSurface ? swr->mainFb : swr->fb;
-        localSurface.width = swr->drawingToSurface ? swr->mainWidth : swr->width;
-        localSurface.height = swr->drawingToSurface ? swr->mainHeight : swr->height;
+        localSurface.buffer = swrIsOnSurface(swr) ? swr->mainFb : swr->fb;
+        localSurface.width = swrIsOnSurface(swr) ? swr->mainWidth : swr->width;
+        localSurface.height = swrIsOnSurface(swr) ? swr->mainHeight : swr->height;
         surface = &localSurface;
     } else {
         if (surfaceID < 0 || (size_t) surfaceID >= swr->surfaceCount || swr->surfaces[surfaceID] == NULL) {
@@ -1253,7 +1256,7 @@ static void SWRenderer_drawSurface(Renderer* renderer, int32_t surfaceID,
                 "tint=%06X alpha=%.3f blend=%d mode=%d to=%d\n",
                 (int) surfaceID, srcLeft, srcTop, srcWidth, srcHeight, x, y, xscale, yscale,
                 angleDeg, (unsigned) (color & 0xFFFFFF), alpha, swr->blendMode, swr->pixelMode,
-                swr->drawingToSurface ? swr->currentSurfaceIndex : -1);
+                swrIsOnSurface(swr) ? swr->currentSurfaceIndex : -1);
     }
     
     if (srcWidth < 0) {

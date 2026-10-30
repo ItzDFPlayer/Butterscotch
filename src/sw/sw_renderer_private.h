@@ -149,6 +149,18 @@ typedef struct
 }
 SWRenderer;
 
+// True when the renderer is drawing into a surface. Every read of the draw target
+// goes through this instead of looking at `drawingToSurface` directly: the flag and
+// `currentSurfaceIndex` can disagree (a pass torn down by a room or chapter change
+// leaves the flag set with no index, which is exactly how swr->surfaces[-1] got read
+// and crashed the GUI pass), and a target is only real when both agree.
+FORCE_INLINE bool swrIsOnSurface(const SWRenderer* swr)
+{
+    return swr->drawingToSurface &&
+           swr->currentSurfaceIndex >= 0 &&
+           (size_t) swr->currentSurfaceIndex < swr->surfaceCount;
+}
+
 // Inlined function definitions included below
 #include "sw_pixel_calc.h"
 #include "sw_inlined.h"

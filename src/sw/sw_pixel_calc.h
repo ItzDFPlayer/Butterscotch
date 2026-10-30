@@ -234,15 +234,18 @@ FORCE_INLINE void swrSetupBlendState(SWRenderer* swr)
     }
     else if (swr->blendSrcFactor == 0)
     {
-        // The blendMode enum is in charge. bm_normal and bm_add are weighted sums, so
-        // the legacy alphaBlend() path reproduces them exactly, but only when no colour
-        // write mask is set. bm_min, bm_max and bm_reverse_subtract are separate blend
-        // *operations* that no sum can express, so they always take the general path:
-        // treating them as a plain weighted sum is what paints Deltarune's overworld
-        // damage veil as a solid white screen instead of darkening the scene.
+        // The blendMode enum is in charge. bm_normal, bm_add and bm_subtract are all
+        // weighted sums, so the legacy alphaBlend() path reproduces them exactly
+        // (bm_subtract arrives there with a negated source alpha), but only when no
+        // colour write mask is set. bm_min, bm_max and bm_reverse_subtract are
+        // separate blend *operations* that no sum can express, so they always take
+        // the general path: treating them as a plain weighted sum is what paints
+        // Deltarune's overworld damage veil as a solid white screen instead of
+        // darkening the scene.
         bool maskActive = swr->writeMask != WRITE_MASK_ALL;
-        bool plainMode = (swr->blendMode == bm_normal || swr->blendMode == bm_add);
-        if (plainMode && !maskActive)
+        bool sumMode = (swr->blendMode == bm_normal || swr->blendMode == bm_add ||
+                        swr->blendMode == bm_subtract);
+        if (sumMode && !maskActive)
             swr->pixelMode = SWR_PIXEL_LEGACY;
         else
             swr->pixelMode = SWR_PIXEL_GENERIC;
@@ -311,14 +314,14 @@ FORCE_INLINE void swrBlitPixelEx(SWRenderer* swr, uintpixel_t* dstPtr, uintpixel
             if (sf == 0)
             {
                 // The blendMode enum is in charge. bm_normal and bm_add are weighted
-                // sums, which a factor pair expresses, but bm_min, bm_max and
-                // bm_reverse_subtract are separate blend *operations*: evaluated as a
-                // sum they replace the scene with the veil colour, which is why
+                // sums, which a factor pair expresses, but bm_subtract, bm_min, bm_max
+                // and bm_reverse_subtract are separate blend *operations*: evaluated as
+                // a sum they replace the scene with the veil colour, which is why
                 // Deltarune's overworld damage overlay used to paint a solid white
                 // screen instead of darkening it. The source is weighted by the draw
                 // alpha so a half-transparent veil only partly clamps or darkens.
                 if (swr->blendMode == bm_max || swr->blendMode == bm_min ||
-                    swr->blendMode == bm_reverse_subtract)
+                    swr->blendMode == bm_reverse_subtract || swr->blendMode == bm_subtract)
                 {
                     const int rw = (sr * srcAlpha) >> 8;
                     const int gw = (sg * srcAlpha) >> 8;
@@ -337,7 +340,14 @@ FORCE_INLINE void swrBlitPixelEx(SWRenderer* swr, uintpixel_t* dstPtr, uintpixel
                         g = gw < dg ? gw : dg;
                         b = bw < db ? bw : db;
                     }
-                    else  // bm_reverse_subtract
+                    else if (swr->blendMode == bm_reverse_subtract)
+                    {
+                        // src - dst
+                        r = rw - dr; if (r < 0) r = 0;
+                        g = gw - dg; if (g < 0) g = 0;
+                        b = bw - db; if (b < 0) b = 0;
+                    }
+                    else  // bm_subtract: dst - src
                     {
                         r = dr - rw; if (r < 0) r = 0;
                         g = dg - gw; if (g < 0) g = 0;
@@ -345,8 +355,16 @@ FORCE_INLINE void swrBlitPixelEx(SWRenderer* swr, uintpixel_t* dstPtr, uintpixel
                     }
 
                     // Neither operation can make a transparent destination opaque,
-                    // so the alpha bit only follows an opaque source.
-                    bool opaqueOut = (dst & SWR_ALPHA_BIT) != 0 || srcAlpha > 127;
+                    // so the alpha bit only follows an opaque source. bm_subtract also
+                    // clears it, which is how the mask passes cut their hole: the same
+                    // draw alpha that painted the veil is subtracted back out of the
+                    // destination alpha.
+                    bool opaqueOut;
+                    if (swr->blendMode == bm_subtract)
+                        opaqueOut = (dst & SWR_ALPHA_BIT) != 0 && srcAlpha == 0;
+                    else
+                        opaqueOut = (dst & SWR_ALPHA_BIT) != 0 || srcAlpha > 127;
+
                     result = (uintpixel_t) ((opaqueOut ? SWR_ALPHA_BIT : 0) |
                                             (r << 10) | (g << 5) | b);
                     break;

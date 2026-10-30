@@ -38,7 +38,7 @@ SWTexture* swrWritableSurfaceTexture(SWRenderer* swr, int surfaceID)
 
 void swrCommitShadowWritesToSurfaceIfNeeded(SWRenderer* swr, SWSurface* surface)
 {
-    if (LIKELY(!swr->drawingToSurface))
+    if (LIKELY(!swrIsOnSurface(swr)))
         return;
     
     if (UNLIKELY(!surface))

@@ -189,11 +189,14 @@ void parseCommandLineArgs(CommandLineArgs* args, int argc, char* argv[]) {
 #endif
         {"lazy-audio", no_argument, nullptr, 'K'},
         {"load-type", required_argument, nullptr, 999},
-        {"bake-textures", required_argument, nullptr, 1004},
-        {"no-auto-bake-textures", no_argument, nullptr, 1005},
-        {"log-file", required_argument, nullptr, 1006},
-        {"perf-log", required_argument, nullptr, 1007},
-        {"perf-log-slow-ms", required_argument, nullptr, 1008},
+        // These five used to start at 1004, which is --surface-format's value in GL
+        // builds: that compiles only while GL is off (the case labels collide
+        // otherwise), so they now sit above the highest id in the table.
+        {"bake-textures", required_argument, nullptr, 1020},
+        {"no-auto-bake-textures", no_argument, nullptr, 1021},
+        {"log-file", required_argument, nullptr, 1022},
+        {"perf-log", required_argument, nullptr, 1023},
+        {"perf-log-slow-ms", required_argument, nullptr, 1024},
         {"disable-log-colours", no_argument, nullptr, 1003},
         {"disable-log-colors", no_argument, nullptr, 1003},
 #ifdef ENABLE_VM_OPCODE_PROFILER
@@ -561,19 +564,19 @@ void parseCommandLineArgs(CommandLineArgs* args, int argc, char* argv[]) {
             case 1003:
                 args->disableLogColours = true;
                 break;
-            case 1004:
+            case 1020:
                 args->bakeTexturesPath = optarg;
                 break;
-            case 1005:
+            case 1021:
                 args->disableAutoBakeTextures = true;
                 break;
-            case 1006:
+            case 1022:
                 args->logFilePath = optarg;
                 break;
-            case 1007:
+            case 1023:
                 args->perfLogPath = optarg;
                 break;
-            case 1008: {
+            case 1024: {
                 char* endPtr = nullptr;
                 long ms = strtol(optarg, &endPtr, 10);
                 if (endPtr == optarg || *endPtr != '\0' || ms < 1 || ms > 10000) {

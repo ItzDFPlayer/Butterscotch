@@ -77,7 +77,7 @@ static void swrTraceDraw(SWRenderer* swr, const char* kind, const SWTexture* tex
                          int sx, int sy, int sw, int sh, int dx, int dy, int dw, int dh,
                          int alpha, uint32_t tint)
 {
-    if (!swr->traceDraws && !(swr->drawingToSurface && swrDiagLogEnabled())) return;
+    if (!swr->traceDraws && !(swrIsOnSurface(swr) && swrDiagLogEnabled())) return;
 
     int page = -1;
     if (texture != nullptr) {
@@ -86,10 +86,10 @@ static void swrTraceDraw(SWRenderer* swr, const char* kind, const SWTexture* tex
         }
     }
 
-    logInfo("DRAW %-8s page=%2d src=%4d,%4d,%4d,%4d dst=%5d,%5d,%4d,%4d alpha=%3d tint=%04X blend=%d mask=%04X mode=%d surf=%d\n",
+    logInfo("DRAW %-8s page=%2d src=%4d,%4d,%4d,%4d dst=%5d,%5d,%4d,%4d alpha=%3d tint=%04X blend=%d mask=%04X mode=%d surf=%d swr=%p\n",
             kind, page, sx, sy, sw, sh, dx, dy, dw, dh, alpha, (unsigned) (tint & 0x7FFF),
             swr->blendMode, (unsigned) swr->writeMask, swr->pixelMode,
-            swr->drawingToSurface ? swr->currentSurfaceIndex : -1);
+            swrIsOnSurface(swr) ? swr->currentSurfaceIndex : -1, (void*) swr);
 }
 
 // ==== Vectorised fills ====
@@ -140,9 +140,18 @@ static void swrFillSpanVector(uintpixel_t* dst, int count, uintpixel_t color,
     if (srcalpha == 0) return;
     if (dstalpha < 3 && srcalpha > 253)
     {
+        // Write whole vectors while a whole vector fits, then the remainder one
+        // pixel at a time. The previous version stored eight pixels per iteration
+        // over `count` iterations, so it ran up to seven pixels past the end of the
+        // span; when the span ended on the last row of the framebuffer that wrote
+        // past the allocation and corrupted the heap (it is what made the chapter
+        // hand-off die with "malloc(): corrupted top size").
         swrVec8 src = swrSplat8(color);
-        for (int i = 0; i < count; i++)
+        int i = 0;
+        for (; i + 8 <= count; i += 8)
             memcpy(dst + i, &src, sizeof(src));
+        for (; i < count; i++)
+            dst[i] = color;
         return;
     }
 
@@ -1241,14 +1250,31 @@ static bool swrResolveGlyph(
 bool swrSwitchToSurface(Renderer* renderer, int32_t targetSurfaceId, bool restoreOldView)
 {
     SWRenderer* swr = (SWRenderer*) renderer;
+
+    if (swrDiagLogEnabled())
+        logInfo("Surf switch   swr=%p target=%d from=%d drawing=%d\n", (void*) swr,
+                (int) targetSurfaceId, (int) swr->currentSurfaceIndex,
+                swrIsOnSurface(swr) ? 1 : 0);
     
-    if (swr->drawingToSurface) {
-        swrCommitShadowWritesToSurfaceIfNeeded(swr, swr->surfaces[swr->currentSurfaceIndex]);
+    if (swrIsOnSurface(swr)) {
+        // The game can free the surface it is drawing into (Deltarune's menu does),
+        // and a torn-down pass can leave `drawingToSurface` set with no valid
+        // currentSurfaceIndex. Reading swr->surfaces[-1] there is what segfaulted on
+        // the GUI pass right after a chapter hand-off, so check before indexing.
+        int32_t current = swr->currentSurfaceIndex;
+        if (current >= 0 && (size_t) current < swr->surfaceCount)
+            swrCommitShadowWritesToSurfaceIfNeeded(swr, swr->surfaces[current]);
+        else {
+            if (swrDiagLogEnabled())
+                logWarn("Surf target   drawing into an invalid surface (%d), dropping it\n",
+                        (int) current);
+            swr->drawingToSurface = false;
+        }
     }
     
     if (targetSurfaceId == RENDER_TARGET_HOST_FRAMEBUFFER)
     {
-        if (!swr->drawingToSurface)
+        if (!swrIsOnSurface(swr))
             return true;
         
         if (swrDiagLogEnabled())
@@ -1300,7 +1326,7 @@ bool swrSwitchToSurface(Renderer* renderer, int32_t targetSurfaceId, bool restor
                 swr->portX, swr->portY, swr->portW, swr->portH, swr->scaleX, swr->scaleY);
     }
     
-    if (!swr->drawingToSurface)
+    if (!swrIsOnSurface(swr))
     {
         // back up the original framebuffer
         swr->drawingToSurface = true;
