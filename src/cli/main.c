@@ -1,6 +1,7 @@
 #include "args.h"
 #include <loop.h>
 #include <getopt.h>
+#include "log.h"
 
 /* For SDL_main */
 #if defined(USE_SDL1)
@@ -47,7 +48,15 @@ int main(int argc, char* argv[]) {
     CommandLineArgs args;
     parseCommandLineArgs(&args, argc, argv);
     logColour = !args.disableLogColours;
+    if (args.logFilePath != nullptr && args.logFilePath[0] != '\0') {
+        if (!logSetFile(args.logFilePath)) {
+            logWarn("Could not open log file '%s'; continuing without it\n", args.logFilePath);
+        } else {
+            logInfo("Mirroring log output to '%s'\n", args.logFilePath);
+        }
+    }
     int ret = loop(args, argv[0]);
+    logCloseFile();
     freeCommandLineArgs(&args);
     return ret;
 }
