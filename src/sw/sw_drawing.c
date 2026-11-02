@@ -86,10 +86,15 @@ static void swrTraceDraw(SWRenderer* swr, const char* kind, const SWTexture* tex
         }
     }
 
-    logInfo("DRAW %-8s page=%2d src=%4d,%4d,%4d,%4d dst=%5d,%5d,%4d,%4d alpha=%3d tint=%04X blend=%d mask=%04X mode=%d surf=%d swr=%p\n",
+    const char* shaderName = "-";
+    DataWin* dataWin = swr->base.dataWin;
+    if (swr->shaderIndex >= 0 && dataWin != nullptr && (uint32_t) swr->shaderIndex < dataWin->shdr.count)
+        shaderName = dataWin->shdr.shaders[swr->shaderIndex].name;
+
+    logInfo("DRAW %-8s page=%2d src=%4d,%4d,%4d,%4d dst=%5d,%5d,%4d,%4d alpha=%3d tint=%04X blend=%d mask=%04X mode=%d surf=%d shd=%s swr=%p\n",
             kind, page, sx, sy, sw, sh, dx, dy, dw, dh, alpha, (unsigned) (tint & 0x7FFF),
             swr->blendMode, (unsigned) swr->writeMask, swr->pixelMode,
-            swrIsOnSurface(swr) ? swr->currentSurfaceIndex : -1, (void*) swr);
+            swrIsOnSurface(swr) ? swr->currentSurfaceIndex : -1, shaderName, (void*) swr);
 }
 
 // ==== Vectorised fills ====
@@ -1545,10 +1550,10 @@ void swrDrawSprite(
 )
 {
     SWRenderer *swr = (SWRenderer*) renderer;
-    
+
     swrTransformPosIfNeeded(swr, &dx, &dy);
     swrTransformSizeIfNeeded(swr, &dw, &dh);
-    
+
     swrTraceDraw(swr, "sprite", texture, sx, sy, sw, sh,
                  swrFloor(dx), swrFloor(dy), swrCeiling(dw), swrCeiling(dh),
                  swrIntAlpha(alpha), tintColor);

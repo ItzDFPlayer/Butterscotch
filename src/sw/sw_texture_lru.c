@@ -39,6 +39,12 @@ static bool swrWasRecentlyEvicted(SWRenderer* swr, uint32_t pageId)
     return false;
 }
 
+// Page whose strip is being decoded right now. Its buffer is being written to, so it
+// must not be picked as an eviction victim: freeing it would pull the memory out from
+// under the decoder and leave the page half decoded (which shows up as holes in the
+// artwork).
+static uint32_t swrPinnedPage = UINT32_MAX;
+
 // Returns the decoded original TXTR page with the oldest use tick, or -1.
 // Only original texture pages are evictable; dynamic sprite/surface pages live
 // above textureCount and are owned by their creator.
@@ -50,6 +56,8 @@ static int swrLeastRecentlyUsedPage(SWRenderer* swr)
     for (size_t i = 0; i < swr->textureCount; i++) {
         SWTexture* texture = swr->textures[i];
         if (texture == NULL)
+            continue;
+        if (i == swrPinnedPage)
             continue;
         if (texture->lastUsedTick < oldest) {
             oldest = texture->lastUsedTick;
@@ -257,9 +265,16 @@ static bool swrLoadStrip(SWRenderer* swr, uint32_t pageId, int stripIndex)
     size_t pixels = (size_t) tex->width * (size_t) rows;
     size_t stripBytes = pixels * sizeof(uintpixel_t);
 
-    // Reserve before decoding so a full cache evicts another page instead of
-    // growing past the budget.
+    // Reserve before decoding so a full cache evicts another page instead of growing
+    // past the budget. Pin this page for the reservation: the decode below writes
+    // straight into its buffer.
+    swrPinnedPage = pageId;
     swrReserveTextureBytes(swr, stripBytes);
+    swrPinnedPage = UINT32_MAX;
+
+    tex = swr->textures[pageId];
+    if (tex == NULL) return false;
+    if (tex->stripsLoaded & (1u << stripIndex)) return true;
 
     uintpixel_t* dst = tex->buffer + (size_t) firstRow * (size_t) tex->width;
     if (!ImageDecoder_decodeStrip(view.qoi, view.qoiSize, &view.checkpoints[stripIndex],
