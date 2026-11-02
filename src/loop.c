@@ -3,6 +3,7 @@
 #include "data_win.h"
 #include "vm.h"
 #include "loop.h"
+#include "save_state.h"
 
 #include "platformdefs.h"
 #include "stdio_compat.h"
@@ -1550,6 +1551,33 @@ int loop(CommandLineArgs args, const char *argv0) {
         // Debug capture (PNG + one draw trace line per draw). F9 by default; on the
         // handheld, where F9 does not exist, point this at a real button.
         const int32_t captureKey = envKeyCode("BUTTERSCOTCH_CAPTURE_KEY", VK_F9);
+        // Save states: F5 stores a snapshot of the whole VM, F6 reloads it. On the
+        // handheld these are Start + L1 / Start + R1. The state is a snapshot, not a
+        // game save, so it can be taken anywhere and reloaded in place.
+        const int32_t saveStateKey = envKeyCode("BUTTERSCOTCH_SAVESTATE_KEY", VK_F5);
+        const int32_t loadStateKey = envKeyCode("BUTTERSCOTCH_LOADSTATE_KEY", VK_F6);
+        // Headless equivalents, for reproducing a save/load pair without a keyboard.
+        int32_t saveStateFrame = -1;
+        int32_t loadStateFrame = -1;
+        bool saveStateFrameDone = false;
+        bool loadStateFrameDone = false;
+        {
+            const char* env = getenv("BUTTERSCOTCH_SAVESTATE_AT_FRAME");
+            if (env != nullptr && env[0] != '\0') saveStateFrame = (int32_t) strtol(env, nullptr, 10);
+            env = getenv("BUTTERSCOTCH_LOADSTATE_AT_FRAME");
+            if (env != nullptr && env[0] != '\0') loadStateFrame = (int32_t) strtol(env, nullptr, 10);
+        }
+        // Where the snapshot lives: an explicit path, or next to the game's own saves.
+        char statePath[512];
+        {
+            const char* env = getenv("BUTTERSCOTCH_STATE_PATH");
+            if (env != nullptr && env[0] != '\0')
+                snprintf(statePath, sizeof(statePath), "%s", env);
+            else if (args.saveFolder != nullptr)
+                snprintf(statePath, sizeof(statePath), "%s/butterscotch-state.sav", args.saveFolder);
+            else
+                snprintf(statePath, sizeof(statePath), "butterscotch-state.sav");
+        }
         // Same capture, but at fixed frames, so a headless run can produce PNGs of
         // specific moments (a room that only appears late, an effect that is hard to
         // reach by hand). Comma-separated: "120,240,360". Parse errors just disable it.
@@ -1803,6 +1831,29 @@ int loop(CommandLineArgs args, const char *argv0) {
                 bool captureThisFrame = false;
                 repeat(captureFrameCount, i) {
                     if (runner->frameCount == captureFrames[i]) { captureThisFrame = true; break; }
+                }
+
+                // Save states. Both keys are checked after the step so a snapshot
+                // always sits on a frame boundary, never in the middle of a script.
+                // The headless frame hooks fire once: a load rewinds frameCount, so a
+                // "load at frame N" that kept testing for N would load forever.
+                const bool saveStateNow = startPlusShoulder(runner, GP_SHOULDERL, saveStateKey) ||
+                    RunnerKeyboard_checkPressed(runner->keyboard, saveStateKey) ||
+                    (!saveStateFrameDone && saveStateFrame >= 0 && runner->frameCount == saveStateFrame);
+                if (saveStateNow) {
+                    if (saveStateFrame >= 0) saveStateFrameDone = true;
+                    const bool saved = SaveState_save(runner, statePath);
+                    snprintf(skipBanner, sizeof(skipBanner), "%s", saved ? "STATE SAVED" : "STATE FAILED");
+                    skipBannerUntil = nowNanos() + 1500000000ull;
+                }
+                const bool loadStateNow = startPlusShoulder(runner, GP_SHOULDERR, loadStateKey) ||
+                    RunnerKeyboard_checkPressed(runner->keyboard, loadStateKey) ||
+                    (!loadStateFrameDone && loadStateFrame >= 0 && runner->frameCount == loadStateFrame);
+                if (loadStateNow) {
+                    if (loadStateFrame >= 0) loadStateFrameDone = true;
+                    const bool loaded = SaveState_load(runner, statePath);
+                    snprintf(skipBanner, sizeof(skipBanner), "%s", loaded ? "STATE LOADED" : "NO STATE");
+                    skipBannerUntil = nowNanos() + 1500000000ull;
                 }
                 if (gfx == SOFTWARE && (RunnerKeyboard_checkPressed(runner->keyboard, captureKey) ||
                                         captureThisFrame)) {

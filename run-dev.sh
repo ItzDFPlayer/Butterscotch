@@ -126,7 +126,12 @@ mkdir -p "$SAVES"
 # Absolute, because the runner may change directory and would otherwise write
 # ./saves relative to wherever it ends up.
 SAVES=$(cd "$SAVES" && pwd)
+# --- save states -----------------------------------------------------------
 
+
+# F5/F6 (Start+L1 / Start+R1 on the handheld) store and reload a snapshot of the
+# VM. Keep it with the saves so it never lands in the Steam install.
+export BUTTERSCOTCH_STATE_PATH=${BUTTERSCOTCH_STATE_PATH:-$SAVES/butterscotch-state.sav}
 # --- log file --------------------------------------------------------------
 
 # Log by default: a crash then leaves its last lines on disk instead of only in
@@ -143,8 +148,7 @@ fi
 
 echo "runner:   $BIN"
 echo "game:     $DATA"
-echo "saves:    $SAVES"
-echo "renderer: software"
+echo "saves:    $SAVES"echo "renderer: software"
 [ -n "$LOG_ARGS" ] && echo "log:      $LOG_PATH"
 
 # --- run -------------------------------------------------------------------

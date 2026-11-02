@@ -998,6 +998,18 @@ void Runner_drawTileLayer(Runner* runner, RoomLayerTilesData* data, float layerO
 // refCount starts at 1 (the registry's implicit ref); callers that retain a reference must Instance_structIncRef.
 Instance* Runner_createStruct(Runner* runner);
 Instance* Runner_createInstance(Runner* runner, GMLReal x, GMLReal y, int32_t objectIndex);
+
+// ===[ Save states ]===
+// Builds a room's layers, backgrounds and views without creating its instances and
+// without running any game code. Save-state loading materialises the instances from
+// the state file instead, so that reloading a state never re-runs an encounter.
+void Runner_quietLoadRoom(Runner* runner, int32_t roomIndex);
+// Creates an instance with an exact id, without firing Create or running any
+// script. Returns nullptr when objectIndex is not a valid object.
+Instance* Runner_restoreInstance(Runner* runner, uint32_t instanceId, int32_t objectIndex,
+                                 GMLReal x, GMLReal y);
+// Same, for a GML struct (objectIndex == STRUCT_OBJECT_INDEX).
+Instance* Runner_restoreStruct(Runner* runner, uint32_t instanceId);
 Instance* Runner_createInstanceWithDepth(Runner* runner, GMLReal x, GMLReal y, int32_t objectIndex, int32_t depth);
 Instance* Runner_createInstanceWithLayer(Runner* runner, GMLReal x, GMLReal y, int32_t objectIndex, int32_t layerId);
 Instance* Runner_copyInstance(Runner* runner, Instance* source, bool performEvent);

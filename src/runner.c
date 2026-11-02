@@ -1597,7 +1597,10 @@ static void copyRoomViewToRuntimeView(RoomView* roomView, RuntimeView* runtimeVi
     runtimeView->portHeight = roomView->portHeight;
 }
 
-static void initRoom(Runner* runner, int32_t roomIndex) {
+// Builds a room's runtime state. `quiet` skips everything that runs game code and
+// creates its instances, which is what a save-state load needs: the room's layers,
+// backgrounds and views are rebuilt, and the instances come from the state file.
+static void initRoom(Runner* runner, int32_t roomIndex, bool quiet) {
     DataWin* dataWin = runner->dataWin;
     require(roomIndex >= 0 && dataWin->room.count > (uint32_t) roomIndex);
 
@@ -1639,8 +1642,11 @@ static void initRoom(Runner* runner, int32_t roomIndex) {
         }
     }
 
-    // If this is a persistent room that was previously visited, restore saved state
-    if (room->persistent && savedState->initialized) {
+    // If this is a persistent room that was previously visited, restore saved state.
+    // A save-state load always builds the room fresh: its instances are replaced
+    // wholesale afterwards, so restoring a persistent room's own snapshot would only
+    // duplicate work.
+    if (!quiet && room->persistent && savedState->initialized) {
         memcpy(runner->views, savedState->views, sizeof(runner->views));
         runner->viewsEnabled = savedState->viewsEnabled;
         // Restore the room-scoped default cameras (whole array); user cameras are global and left untouched.
@@ -1894,7 +1900,7 @@ static void initRoom(Runner* runner, int32_t roomIndex) {
     // (e.g. obj_mainchara reading obj_markerA.x), the target already exists.
 
     // Pass 1: Create all instances without firing events
-    {
+    if (!quiet) {
     repeat(room->gameObjectCount, i) {
         RoomGameObject* roomObj = &room->gameObjects[i];
 
@@ -1953,7 +1959,7 @@ static void initRoom(Runner* runner, int32_t roomIndex) {
     }
 
     // Pass 2: Fire events for newly created instances (in room definition order)
-    {
+    if (!quiet) {
         repeat(room->gameObjectCount, i) {
             RoomGameObject* roomObj = &room->gameObjects[i];
 
@@ -1998,7 +2004,7 @@ static void initRoom(Runner* runner, int32_t roomIndex) {
     }
 
     // Run room creation code
-    if (room->creationCodeId >= 0 && dataWin->code.count > (uint32_t) room->creationCodeId) {
+    if (!quiet && room->creationCodeId >= 0 && dataWin->code.count > (uint32_t) room->creationCodeId) {
         // Room creation code runs in global context, the native runner creates a fake/dummy instance for the "self"
         Instance* dummy = Instance_create(0, STRUCT_OBJECT_INDEX, 0, 0);
         RValue result = VM_executeCode(
@@ -2688,6 +2694,30 @@ Instance* Runner_createInstance(Runner* runner, GMLReal x, GMLReal y, int32_t ob
     return inst;
 }
 
+// ===[ Save states ]===
+
+void Runner_quietLoadRoom(Runner* runner, int32_t roomIndex) {
+    initRoom(runner, roomIndex, true);
+}
+
+Instance* Runner_restoreInstance(Runner* runner, uint32_t instanceId, int32_t objectIndex,
+                                 GMLReal x, GMLReal y) {
+    DataWin* dataWin = runner->dataWin;
+    if (objectIndex < 0 || dataWin->objt.count <= (uint32_t) objectIndex) return nullptr;
+    // createAndInitInstance is exactly "make the instance as the room would, minus
+    // the events"; the caller overwrites the fields from the state right after.
+    return createAndInitInstance(runner, (int32_t) instanceId, objectIndex, x, y);
+}
+
+Instance* Runner_restoreStruct(Runner* runner, uint32_t instanceId) {
+    Instance* s = Instance_create(instanceId, STRUCT_OBJECT_INDEX, 0, 0);
+    hmput(runner->instancesById, s->instanceId, s);
+    s->structRegistryIndex = (int32_t) arrlen(runner->structInstances);
+    arrput(runner->structInstances, s);
+    s->refCount = 1;
+    return s;
+}
+
 // Same as Runner_createInstance, but sets depth BEFORE firing Create events so scripts like scr_depth can override.
 Instance* Runner_createInstanceWithDepth(Runner* runner, GMLReal x, GMLReal y, int32_t objectIndex, int32_t depth) {
     if (isObjectDisabled(runner, objectIndex)) return nullptr;
@@ -3160,7 +3190,7 @@ void Runner_initFirstRoom(Runner* runner) {
     }
 
     // Initialize the first room
-    initRoom(runner, firstRoomIndex);
+    initRoom(runner, firstRoomIndex, false);
 
     // Fire Game Start for all instances
     Runner_executeEventForAll(runner, EVENT_OTHER, OTHER_GAME_START);
@@ -4456,7 +4486,7 @@ void Runner_handlePendingRoomChange(Runner* runner) {
         }
 
         // Load new room
-        initRoom(runner, newRoomIndex);
+        initRoom(runner, newRoomIndex, false);
 
         // Free the outgoing room's payload after Cleanup and persistent-instance layer transfer.
         if (runner->dataWin->lazyLoadRooms && !oldRoom->eagerlyLoaded && newRoomIndex != oldRoomIndex) {
