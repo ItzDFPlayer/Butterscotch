@@ -1,5 +1,6 @@
 #include "save_state.h"
 
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -589,8 +590,10 @@ static void rdInstanceFields(Reader* r, Instance* inst, int32_t* outStaticParent
 }
 
 // ===[ Save ]===
-static uint32_t gameFingerprint(DataWin* dataWin)
+uint32_t SaveState_gameId(DataWin* dataWin)
 {
+    if (dataWin == nullptr) return 0;
+
     // FNV-1a over the identity fields. A state is only valid for the exact
     // data.win it came from, so a mismatched file has to be rejected rather than
     // loaded into a game whose object/room indices mean something else.
@@ -922,14 +925,14 @@ bool SaveState_save(Runner* runner, const char* path)
     w.ok = w.file != nullptr;
     if (!w.ok)
     {
-        logError("SaveState: cannot open '%s' for writing\n", path);
+        logError("SaveState: cannot open '%s' for writing: %s\n", path, strerror(errno));
         graphFree(&graph);
         return false;
     }
 
     wrBytes(&w, SAVE_STATE_MAGIC, 8);
     wrU32(&w, SAVE_STATE_VERSION);
-    wrU32(&w, gameFingerprint(dataWin));
+    wrU32(&w, SaveState_gameId(dataWin));
 
     wrScalars(&w, runner);
 
@@ -1369,7 +1372,7 @@ bool SaveState_load(Runner* runner, const char* path)
         free(bytes);
         return false;
     }
-    if (fingerprint != gameFingerprint(runner->dataWin))
+    if (fingerprint != SaveState_gameId(runner->dataWin))
     {
         logError("SaveState: '%s' belongs to a different game\n", path);
         free(bytes);

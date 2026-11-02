@@ -116,7 +116,7 @@ static void printUsage(const char *argv0) {
         "    BUTTERSCOTCH_SAVESTATE_KEY=<code>     - GML key code that saves a state (default F5)\n"
         "    BUTTERSCOTCH_LOADSTATE_KEY=<code>     - GML key code that loads a state (default F6)\n"
         "    BUTTERSCOTCH_MENU_KEY=<code>          - GML key code that opens the tool menu (default Backspace)\n"
-        "    BUTTERSCOTCH_STATE_PATH=<file>        - Where the state snapshot is kept\n"
+        "    BUTTERSCOTCH_STATE_PATH=<file>        - State file (default: beside the game's saves, one per game)\n"
         "    BUTTERSCOTCH_LOG_VIDEO=1              - Log a video decoder status line every second\n"
         "    BUTTERSCOTCH_VIDEO_SCALE=<px>         - Scale video down to this width (0 = the file's own size)\n"
         "    BUTTERSCOTCH_VIDEO_THREADS=<n>        - Video decoder threads (default 1)\n"

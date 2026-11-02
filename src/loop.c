@@ -1331,6 +1331,10 @@ int loop(CommandLineArgs args, const char *argv0) {
             }
         }
         OverlayFileSystem* overlayFs = OverlayFileSystem_create(dataWinDir, savePath);
+        // Keep a copy: save states live beside the game's own saves, so a snapshot is
+        // found again on the next launch regardless of the directory the runner was
+        // started from. `savePath` itself may point into the buffers freed below.
+        char* sessionSaveDir = safeStrdup(savePath);
         free(sharedSaveDir);
         free(dataWinDir);
 
@@ -1643,16 +1647,32 @@ int loop(CommandLineArgs args, const char *argv0) {
             env = getenv("BUTTERSCOTCH_LOADSTATE_AT_FRAME");
             if (env != nullptr && env[0] != '\0') loadStateFrame = (int32_t) strtol(env, nullptr, 10);
         }
-        // Where the snapshot lives: an explicit path, or next to the game's own saves.
+        // Where the snapshot lives: an explicit path, otherwise next to the game's own
+        // saves, with the game's identity in the name so two chapters (or two games)
+        // sharing a save folder cannot overwrite each other's slot.
         char statePath[512];
         {
             const char* env = getenv("BUTTERSCOTCH_STATE_PATH");
-            if (env != nullptr && env[0] != '\0')
+            if (env != nullptr && env[0] != '\0') {
                 snprintf(statePath, sizeof(statePath), "%s", env);
-            else if (args.saveFolder != nullptr)
-                snprintf(statePath, sizeof(statePath), "%s/butterscotch-state.sav", args.saveFolder);
-            else
-                snprintf(statePath, sizeof(statePath), "butterscotch-state.sav");
+            } else {
+                const char* dir = sessionSaveDir != nullptr ? sessionSaveDir : ".";
+                snprintf(statePath, sizeof(statePath), "%s/butterscotch-state-%08x.sav",
+                         dir, SaveState_gameId(dataWin));
+
+                // Earlier builds kept a single shared file; keep using it when it is
+                // the only snapshot present, so an existing state is not stranded.
+                char legacyPath[512];
+                snprintf(legacyPath, sizeof(legacyPath), "%s/butterscotch-state.sav", dir);
+                FILE* probe = fopen(statePath, "rb");
+                if (probe != nullptr) {
+                    fclose(probe);
+                } else if ((probe = fopen(legacyPath, "rb")) != nullptr) {
+                    fclose(probe);
+                    snprintf(statePath, sizeof(statePath), "%s", legacyPath);
+                }
+            }
+            logInfo("Save states: %s\n", statePath);
         }
         // Same capture, but at fixed frames, so a headless run can produce PNGs of
         // specific moments (a room that only appears late, an effect that is hard to
@@ -2490,6 +2510,7 @@ int loop(CommandLineArgs args, const char *argv0) {
                 free(currentGameArgs[i]);
             }
             arrfree(currentGameArgs);
+            free(sessionSaveDir);
             logInfo("Bye! :3\n");
 #ifdef _WIN32
             timeEndPeriod(1);

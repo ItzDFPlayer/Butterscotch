@@ -2,8 +2,10 @@
 #define _BS_SAVE_STATE_H_
 
 #include <stdbool.h>
+#include <stdint.h>
 
 struct Runner;
+struct DataWin;
 
 // ===[ Save states ]===
 //
@@ -23,5 +25,10 @@ struct Runner;
 
 bool SaveState_save(struct Runner* runner, const char* path);
 bool SaveState_load(struct Runner* runner, const char* path);
+
+// 32-bit identity of a data.win: the game name, its id and a few chunk counts. Used
+// both to reject a state that belongs to another game and to give each game its own
+// state file, so chapters and games cannot overwrite each other's snapshot.
+uint32_t SaveState_gameId(struct DataWin* dataWin);
 
 #endif//_BS_SAVE_STATE_H_

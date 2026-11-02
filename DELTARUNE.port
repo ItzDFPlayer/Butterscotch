@@ -56,7 +56,9 @@ export BUTTERSCOTCH_MENU_KEY=8
 # Save states: a snapshot of the whole VM (instances, globals, ds_* pools, the
 # room and the RNG) that can be reloaded in place, unlike the game's own save
 # points. Start + L1 stores one, Start + R1 reloads it; F5/F6 work on a keyboard.
-# The file goes next to the game's saves unless BUTTERSCOTCH_STATE_PATH is set.
+# The file lives beside the game's saves and carries the game's identity in its
+# name (butterscotch-state-<id>.sav), so each chapter keeps its own snapshot and
+# it is found again on the next launch; BUTTERSCOTCH_STATE_PATH overrides that.
 # Music stops when a state loads, and anything the game wrote to disk is kept.
 export BUTTERSCOTCH_SAVESTATE_KEY=116
 export BUTTERSCOTCH_LOADSTATE_KEY=117
