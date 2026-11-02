@@ -25,7 +25,8 @@
 // variable is restored.
 
 #define SAVE_STATE_MAGIC   "BSSTATE1"
-#define SAVE_STATE_VERSION 1u
+// 2: added the runtime layer section (element ids, order and layer state).
+#define SAVE_STATE_VERSION 2u
 
 // Value type tags used in the file. These mirror RValueType, but stay explicit so
 // the format does not silently change when a new GML type is added.
@@ -876,6 +877,58 @@ static void wrScalars(Writer* w, Runner* runner)
     }
 }
 
+// ===[ Layers ]===
+// Layer element ids come from a counter that the room build advances, and GML keeps
+// those ids in instance variables (a tilemap element id for tilemap_get_at_pixel, an
+// element id for the layer_* calls). Rebuilding the room on load hands out fresh ids,
+// so every stored id stops resolving and the runner dies on the first builtin that
+// looks one up. The state therefore carries the layer element ids and their order,
+// plus the layer fields the game can change at runtime.
+static void wrLayers(Writer* w, Runner* runner)
+{
+    wrU32(w, runner->nextLayerDrawOrder);
+    wrU32(w, (uint32_t) arrlen(runner->runtimeLayers));
+    repeat((int32_t) arrlen(runner->runtimeLayers), i)
+    {
+        RuntimeLayer* layer = &runner->runtimeLayers[i];
+        wrU32(w, layer->id);
+        wrI32(w, layer->depth);
+        wrU32(w, layer->drawOrder);
+        wrF32(w, layer->xOffset);
+        wrF32(w, layer->yOffset);
+        wrF32(w, layer->hSpeed);
+        wrF32(w, layer->vSpeed);
+        wrU8(w, layer->visible ? 1 : 0);
+        wrU8(w, layer->automaticDepth ? 1 : 0);
+        wrI32(w, layer->shaderIndex);
+        // Dynamic layers only exist because GML created them, so a load has to
+        // recreate them: the room build alone never produces one.
+        wrU8(w, layer->dynamic ? 1 : 0);
+        wrI32(w, layer->beginScript);
+        wrI32(w, layer->endScript);
+        wrStr(w, layer->dynamicName);
+
+        wrU32(w, (uint32_t) arrlen(layer->elements));
+        repeat((int32_t) arrlen(layer->elements), j)
+        {
+            RuntimeLayerElement* el = &layer->elements[j];
+            wrU32(w, el->id);
+            wrU8(w, (uint8_t) el->type);
+            wrU8(w, el->visible ? 1 : 0);
+            wrF32(w, el->alpha);
+            wrU32(w, el->blend);
+            wrI32(w, el->instanceId);
+
+            // Only tiles made by layer_tile_create have no room data to rebuild from,
+            // so those are the only payloads that have to be written out.
+            const bool ownedTile = el->type == RuntimeLayerElementType_Tile
+                && el->tileElementOwned && el->tileElement != nullptr;
+            wrU8(w, ownedTile ? 1 : 0);
+            if (ownedTile) wrBytes(w, el->tileElement, sizeof(RoomTile));
+        }
+    }
+}
+
 bool SaveState_save(Runner* runner, const char* path)
 {
     if (runner == nullptr || path == nullptr) return false;
@@ -974,6 +1027,9 @@ bool SaveState_save(Runner* runner, const char* path)
 
     wrGlobals(&w, &graph, globalScope);
     wrDsPools(&w, &graph, runner);
+    // Last: the layer section points at instances, so it has to be applied after every
+    // instance exists.
+    wrLayers(&w, runner);
 
     if (w.file != nullptr)
     {
@@ -1324,6 +1380,222 @@ static void rdGlobals(Reader* r, Loader* loader)
     }
 }
 
+// ===[ Layers ]===
+typedef struct
+{
+    uint32_t id;
+    uint32_t type;
+    bool visible;
+    float alpha;
+    uint32_t blend;
+    int32_t instanceId;
+    bool ownedTile;
+    RoomTile tile;
+}
+SavedLayerElement;
+
+typedef struct
+{
+    uint32_t id;
+    int32_t depth;
+    uint32_t drawOrder;
+    float xOffset;
+    float yOffset;
+    float hSpeed;
+    float vSpeed;
+    bool visible;
+    bool automaticDepth;
+    int32_t shaderIndex;
+    bool dynamic;
+    int32_t beginScript;
+    int32_t endScript;
+    char* dynamicName; // owned
+    SavedLayerElement* elements; // stb_ds array
+}
+SavedLayer;
+
+// Rebuilds one layer's element array from the state: the room supplies the payloads
+// for the static elements it just created (backgrounds, sprites, tilemaps and room
+// tiles), while instance elements and layer_tile_create tiles are rebuilt from the
+// file. Ids and order both come from the state, so stored ids keep resolving and the
+// in-layer draw order matches the frame the state was taken in.
+static void applySavedLayer(Runner* runner, const SavedLayer* saved)
+{
+    RuntimeLayer* layer = Runner_findRuntimeLayerById(runner, (int32_t) saved->id);
+    if (layer == nullptr)
+    {
+        if (!saved->dynamic)
+        {
+            logWarn("SaveState: state has layer %u, which this room does not have\n", (unsigned) saved->id);
+            return;
+        }
+        // Recreate what layer_create made: same id, so stored layer ids keep working.
+        RuntimeLayer created = {0};
+        created.id = saved->id;
+        created.depth = saved->depth;
+        created.drawOrder = saved->drawOrder;
+        created.visible = saved->visible;
+        created.dynamic = true;
+        created.automaticDepth = saved->automaticDepth;
+        created.dynamicName = saved->dynamicName != nullptr ? safeStrdup(saved->dynamicName) : nullptr;
+        created.beginScript = saved->beginScript;
+        created.endScript = saved->endScript;
+        created.shaderIndex = saved->shaderIndex;
+        arrput(runner->runtimeLayers, created);
+        layer = &arrlast(runner->runtimeLayers);
+    }
+
+    // Keep the room's own static elements, in the order the room built them.
+    RuntimeLayerElement* statics = nullptr;
+    repeat((int32_t) arrlen(layer->elements), i)
+    {
+        const RuntimeLayerElement el = layer->elements[i];
+        if (el.type == RuntimeLayerElementType_Instance) continue;
+        arrput(statics, el);
+    }
+    // Tiles made with layer_tile_create are ours to free; everything else in the
+    // array is either borrowed room data or owned elsewhere.
+    repeat((int32_t) arrlen(layer->elements), i)
+    {
+        RuntimeLayerElement* el = &layer->elements[i];
+        if (el->tileElementOwned && el->tileElement != nullptr) free(el->tileElement);
+    }
+    arrsetlen(layer->elements, 0);
+
+    int32_t nextStatic = 0;
+    uint32_t maxId = 0;
+    repeat((int32_t) arrlen(saved->elements), i)
+    {
+        const SavedLayerElement* src = &saved->elements[i];
+        RuntimeLayerElement el = {0};
+        el.id = src->id;
+        el.type = (RuntimeLayerElementType) src->type;
+        el.visible = src->visible;
+        el.alpha = src->alpha;
+        el.blend = src->blend;
+        el.instanceId = -1;
+
+        if (el.type == RuntimeLayerElementType_Instance)
+        {
+            // An instance whose record did not make it back has no element either.
+            if (hmget(runner->instancesById, src->instanceId) == nullptr) continue;
+            el.instanceId = src->instanceId;
+        }
+        else if (src->ownedTile)
+        {
+            RoomTile* tile = (RoomTile*) safeMalloc(sizeof(RoomTile));
+            memcpy(tile, &src->tile, sizeof(RoomTile));
+            el.tileElement = tile;
+            el.tileElementOwned = true;
+        }
+        else
+        {
+            if (nextStatic >= arrlen(statics)) continue;
+            const RuntimeLayerElement fresh = statics[nextStatic];
+            if (fresh.type != el.type)
+            {
+                // The room no longer has the element at this position (the game must
+                // have created or destroyed one); leave it unmatched rather than
+                // handing over a payload of the wrong type.
+                continue;
+            }
+            nextStatic++;
+            el.backgroundElement = fresh.backgroundElement;
+            el.spriteElement = fresh.spriteElement;
+            el.tilemapData = fresh.tilemapData;
+            el.tileElement = fresh.tileElement;
+            el.tileElementOwned = fresh.tileElementOwned;
+            if (el.id == 0) el.id = fresh.id;
+        }
+
+        if (el.id > maxId) maxId = el.id;
+        arrput(layer->elements, el);
+    }
+
+    // Whatever the state did not name keeps the id the room gave it.
+    for (int32_t i = nextStatic; i < (int32_t) arrlen(statics); i++)
+    {
+        if (statics[i].id > maxId) maxId = statics[i].id;
+        arrput(layer->elements, statics[i]);
+    }
+    arrfree(statics);
+
+    layer->depth = saved->depth;
+    layer->drawOrder = saved->drawOrder;
+    layer->xOffset = saved->xOffset;
+    layer->yOffset = saved->yOffset;
+    layer->hSpeed = saved->hSpeed;
+    layer->vSpeed = saved->vSpeed;
+    layer->visible = saved->visible;
+    layer->automaticDepth = saved->automaticDepth;
+    layer->shaderIndex = saved->shaderIndex;
+
+    if (maxId >= runner->nextLayerId) runner->nextLayerId = maxId + 1;
+}
+
+static void rdLayers(Reader* r, Runner* runner)
+{
+    runner->nextLayerDrawOrder = rdU32(r);
+    const uint32_t layerCount = rdU32(r);
+    if (!r->ok || layerCount > 100000u)
+    {
+        r->ok = false;
+        return;
+    }
+
+    repeat((int32_t) layerCount, i)
+    {
+        SavedLayer saved = {0};
+        saved.id = rdU32(r);
+        saved.depth = rdI32(r);
+        saved.drawOrder = rdU32(r);
+        saved.xOffset = rdF32(r);
+        saved.yOffset = rdF32(r);
+        saved.hSpeed = rdF32(r);
+        saved.vSpeed = rdF32(r);
+        saved.visible = rdU8(r) != 0;
+        saved.automaticDepth = rdU8(r) != 0;
+        saved.shaderIndex = rdI32(r);
+        saved.dynamic = rdU8(r) != 0;
+        saved.beginScript = rdI32(r);
+        saved.endScript = rdI32(r);
+        saved.dynamicName = rdStr(r);
+
+        const uint32_t elementCount = rdU32(r);
+        if (!r->ok || elementCount > 1000000u)
+        {
+            r->ok = false;
+            arrfree(saved.elements);
+            free(saved.dynamicName);
+            return;
+        }
+        repeat((int32_t) elementCount, j)
+        {
+            SavedLayerElement el = {0};
+            el.id = rdU32(r);
+            el.type = rdU8(r);
+            el.visible = rdU8(r) != 0;
+            el.alpha = rdF32(r);
+            el.blend = rdU32(r);
+            el.instanceId = rdI32(r);
+            el.ownedTile = rdU8(r) != 0;
+            if (el.ownedTile) rdBytes(r, &el.tile, sizeof(RoomTile));
+            arrput(saved.elements, el);
+            if (!r->ok) break;
+        }
+        if (!r->ok)
+        {
+            arrfree(saved.elements);
+            free(saved.dynamicName);
+            return;
+        }
+
+        applySavedLayer(runner, &saved);
+        arrfree(saved.elements);
+        free(saved.dynamicName);
+    }
+}
+
 bool SaveState_load(Runner* runner, const char* path)
 {
     if (runner == nullptr || path == nullptr) return false;
@@ -1365,7 +1637,9 @@ bool SaveState_load(Runner* runner, const char* path)
         free(bytes);
         return false;
     }
-    if (version != SAVE_STATE_VERSION)
+    // Version 1 states predate the layer section. They still load, they just keep the
+    // old behaviour of letting the room rebuild hand out fresh layer element ids.
+    if (version == 0u || version > SAVE_STATE_VERSION)
     {
         logError("SaveState: '%s' was written by another version (%u, expected %u)\n",
                  path, (unsigned) version, (unsigned) SAVE_STATE_VERSION);
@@ -1491,6 +1765,24 @@ bool SaveState_load(Runner* runner, const char* path)
     rdGlobals(&r, &loader);
     if (!r.ok) goto failed;
     rdDsPools(&r, &loader);
+    if (!r.ok) goto failed;
+
+    if (version >= 2u)
+    {
+        // Layers last: the elements point at instances, and the rebuilt arrays and
+        // restored ids change what the draw list has to contain.
+        rdLayers(&r, runner);
+        if (!r.ok) goto failed;
+        runner->drawableListStructureDirty = true;
+        runner->drawableListSortDirty = true;
+    }
+    else
+    {
+        // Nothing recorded the layer element ids, so ids held in GML variables may
+        // point at the wrong element now. Say so instead of hanging later on.
+        logWarn("SaveState: '%s' predates layer ids in states; save it again if the "
+                "game starts behaving strangely\n", path);
+    }
 
 failed:
     free(bytes);
