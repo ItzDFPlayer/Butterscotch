@@ -47,6 +47,33 @@ SWRShaderContext;
 // every sprite draw.
 bool swrShaderEmuActive(SWRenderer* swr);
 
+// ===[ shd_ripple ]===
+// Deltarune draws water ripples as filled rectangles under this shader, which keeps
+// the draw colour and takes the alpha from the distance to the ripple centre. With
+// the shader the rectangle is a soft ring; without it, it is a solid block.
+typedef struct {
+    float centerX, centerY;
+    float radius;      // current ring radius (uniform rippleRad)
+    float maxRadius;
+    float thickness;   // width of the ring band
+    float yRatio;      // vertical squash, so the ring reads as a floor ripple
+    int banding;
+    bool fading;
+}
+SWRippleCtx;
+
+// Reads the uniforms for one ripple draw. False when the bound shader is not
+// shd_ripple or the game has not set the uniforms yet.
+bool swrShaderEmuRippleBegin(SWRenderer* swr, SWRippleCtx* ctx);
+
+// Horizontal extent of the ring on destination row y: [outerX0, outerX1] minus the
+// hole [holeX0, holeX1] (holeX0 > holeX1 when there is no hole). False when the row
+// misses the ring, which lets the caller skip whole spans instead of every pixel.
+bool swrShaderEmuRippleRow(const SWRippleCtx* ctx, int y, int* outerX0, int* outerX1, int* holeX0, int* holeX1);
+
+// Alpha (0..256) the shader would produce at destination pixel (x, y).
+int swrShaderEmuRippleAlpha(const SWRippleCtx* ctx, int x, int y);
+
 // Resolves the bound shader and its sampler stages for one draw. Returns false
 // when the shader has no emulation, in which case the draw must use the normal
 // path.

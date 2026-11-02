@@ -1592,6 +1592,25 @@ int loop(CommandLineArgs args, const char *argv0) {
         // Initialize the first room and fire Game Start / Room Start events
         Runner_initFirstRoom(runner);
 
+        // Debug aid: jump straight to a room by index on the first frame, so a room that
+        // is only reachable after an hour of play can be looked at (and captured with
+        // BUTTERSCOTCH_CAPTURE_FRAME). The normal room transition runs, so layers,
+        // creation code and Room Start events all happen; only the story state that
+        // earlier rooms would have built up is missing.
+        {
+            const char* startRoomEnv = getenv("BUTTERSCOTCH_START_ROOM");
+            if (startRoomEnv != nullptr && startRoomEnv[0] != '\0') {
+                int32_t startRoom = (int32_t) strtol(startRoomEnv, nullptr, 10);
+                if (startRoom >= 0 && (uint32_t) startRoom < runner->dataWin->room.count) {
+                    runner->pendingRoom = startRoom;
+                    logInfo("Debug: starting in room %d ('%s')\n", startRoom,
+                            runner->dataWin->room.rooms[startRoom].name);
+                } else {
+                    logWarn("Ignoring BUTTERSCOTCH_START_ROOM=%s: not a room index\n", startRoomEnv);
+                }
+            }
+        }
+
         // Main loop
         bool debugShowCollisionMasks = false;
         size_t overlayCachedMemBytes = 0;

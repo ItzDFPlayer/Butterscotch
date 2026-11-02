@@ -36,6 +36,7 @@ bool swrShaderEmuActive(SWRenderer* swr)
 {
     return swrShaderNameIs(swr, "shd_shoujo");
 }
+
 static float swrUniform(const SWRenderer* swr, const char* name, float fallback)
 {
     for (int32_t i = 0; i < swr->shaderUniformCount; i++)
@@ -44,6 +45,148 @@ static float swrUniform(const SWRenderer* swr, const char* name, float fallback)
             return swr->shaderUniforms[i].value[0];
     }
     return fallback;
+}
+
+// Reads up to `count` components of a vector uniform, filling the rest from
+// `fallback`. Returns false when the uniform was never set.
+static bool swrUniformVec(const SWRenderer* swr, const char* name, float* out, int count, float fallback)
+{
+    for (int32_t i = 0; i < swr->shaderUniformCount; i++)
+    {
+        if (strcmp(swr->shaderUniforms[i].name, name) != 0) continue;
+        for (int c = 0; c < count; c++)
+            out[c] = c < 4 ? swr->shaderUniforms[i].value[c] : fallback;
+        return true;
+    }
+    for (int c = 0; c < count; c++) out[c] = fallback;
+    return false;
+}
+
+// ===[ shd_ripple ]===
+//
+// Deltarune draws its water ripples as plain filled rectangles with this shader
+// bound: the fragment keeps the draw colour and takes its alpha from the distance to
+// the ripple centre, so the rectangle comes out as a soft ring. Without the shader
+// the whole rectangle lands solid, which reads as a big grey block over the scene -
+// the reason the chapter 5 splash looked so wrong.
+//
+// The ring only covers a thin band and dozens of ripples can be live at once, so the
+// uniforms are read once per draw and the caller iterates per-row spans instead of
+// testing every pixel of the rectangle.
+bool swrShaderEmuRippleBegin(SWRenderer* swr, SWRippleCtx* ctx)
+{
+    if (!swrShaderNameIs(swr, "shd_ripple")) return false;
+
+    float center[2] = { 0.0f, 0.0f };
+    if (!swrUniformVec(swr, "rippleCenter", center, 2, 0.0f)) return false;
+
+    // x: current radius, y: max radius, z: ring thickness, w: vertical squash.
+    float rad[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
+    if (!swrUniformVec(swr, "rippleRad", rad, 4, 0.0f)) return false;
+    if (rad[0] <= 0.0f) return false;
+    if (rad[3] <= 0.0f) rad[3] = 1.0f;
+
+    ctx->centerX = center[0];
+    ctx->centerY = center[1];
+    ctx->radius = rad[0];
+    ctx->maxRadius = rad[1];
+    ctx->thickness = rad[2] > 0.0f ? rad[2] : 0.0f;
+    ctx->yRatio = rad[3];
+    ctx->banding = (int) (swrUniform(swr, "rippleBanding", 0.0f) + 0.5f);
+    ctx->fading = swrUniform(swr, "rippleFading", 0.0f) > 0.5f;
+    return true;
+}
+
+// Vertical offset from the centre for destination row y. The fragment squashes y by
+// the y ratio, so the ring reads as a circle seen at an angle.
+static float swrRippleRowOffset(const SWRippleCtx* ctx, int y)
+{
+    return ((float) y + 0.5f - ctx->centerY) * ctx->yRatio;
+}
+
+// Horizontal extent of the ring on one row: out to the outer edge, minus the hole in
+// the middle (reported as holeX0 > holeX1 when there is none). False when the row
+// misses the ring entirely.
+bool swrShaderEmuRippleRow(const SWRippleCtx* ctx, int y, int* outerX0, int* outerX1, int* holeX0, int* holeX1)
+{
+    const float dy = swrRippleRowOffset(ctx, y);
+    const float ady = fabsf(dy);
+    if (ady >= ctx->radius) return false;
+
+    // One pixel of slack, so the rounding of the edge test stays on the safe side.
+    const float outer = sqrtf(ctx->radius * ctx->radius - ady * ady) + 1.0f;
+    *outerX0 = (int) floorf(ctx->centerX - outer);
+    *outerX1 = (int) ceilf(ctx->centerX + outer);
+
+    const float innerRadius = ctx->radius - ctx->thickness;
+    if (innerRadius > 0.0f && ady < innerRadius)
+    {
+        const float inner = sqrtf(innerRadius * innerRadius - ady * ady) - 1.0f;
+        *holeX0 = (int) ceilf(ctx->centerX - inner);
+        *holeX1 = (int) floorf(ctx->centerX + inner);
+    }
+    else
+    {
+        *holeX0 = 1;
+        *holeX1 = 0;
+    }
+
+    return *outerX1 >= *outerX0;
+}
+
+// Fragment alpha (0..256) the shader would produce at destination pixel (x, y).
+int swrShaderEmuRippleAlpha(const SWRippleCtx* ctx, int x, int y)
+{
+    const float dx = (float) x + 0.5f - ctx->centerX;
+    const float dy = swrRippleRowOffset(ctx, y);
+    const float dist = sqrtf(dx * dx + dy * dy);
+
+    const float currentRadius = ctx->radius;
+    const float thickness = ctx->thickness;
+
+    float edge = dist - (currentRadius - thickness);
+    if (edge < 0.0f) edge = 0.0f;
+
+    const float perc = dist / currentRadius;
+    float alph = 1.0f;
+    const float rimThickness = thickness / 3.0f;
+
+    if (ctx->banding == 1)
+    {
+        alph = perc;
+    }
+    else if (ctx->banding == 0)
+    {
+        if (edge > 0.0f) alph = 0.6f;
+        if (edge > rimThickness) alph = 0.8f;
+        if (edge > rimThickness * 2.0f) alph = 1.0f;
+    }
+    else if (ctx->banding == 2)
+    {
+        if (edge > thickness) alph = 0.0f;
+    }
+
+    // The shader clamps the rim ramp to one pixel, so a ripple is a banded annulus
+    // rather than a gradient spread over its whole thickness.
+    if (edge > 1.0f) edge = 1.0f;
+    if (perc > 1.0f) alph = 0.0f;
+
+    float alpha = edge * alph;
+    if (ctx->fading)
+    {
+        const float fadeStart = ctx->maxRadius / 3.0f;
+        if (ctx->maxRadius > fadeStart)
+        {
+            float fade = 1.0f - (currentRadius - fadeStart) / (ctx->maxRadius - fadeStart);
+            if (fade > 1.0f) fade = 1.0f;
+            if (fade < 0.0f) fade = 0.0f;
+            alpha *= fade;
+        }
+    }
+
+    if (alpha <= 0.0f) return 0;
+    if (alpha > 1.0f) alpha = 1.0f;
+    return (int) (alpha * 256.0f + 0.5f);
 }
 
 // Resolves a texture id from texture_set_stage() to the decoded page plus the

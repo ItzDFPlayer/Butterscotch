@@ -1476,6 +1476,40 @@ void swrFillRectangle(Renderer* renderer, float x1, float y1, float x2, float y2
     
     swrTraceDraw(swr, "fillrect", nullptr, 0, 0, 0, 0, x1i, y1i, xd, yd, alphaInt, pxcolor);
 
+    // shd_ripple: the game draws each water ripple as a filled rectangle and lets the
+    // shader turn it into a ring, taking the alpha from the distance to the ripple
+    // centre instead of from the draw call. Drawing the rectangle as-is leaves a solid
+    // block over the scene, so the ring has to be reproduced here.
+    SWRippleCtx ripple;
+    if (UNLIKELY(swrShaderEmuRippleBegin(swr, &ripple)))
+    {
+        const uint16_t maskBits = swrWriteMaskBits(swr->writeMask);
+        const uintpixel_t srcPixel = (uintpixel_t) ((pxcolor & 0x7FFF) | 0x8000);
+        const int lastX = swr->maxX - 1;
+        const int minX = x1i;
+        const int maxRectX = x1i + xd;
+        for (int y = 0; y <= yd; y++) {
+            const int dstY = y1i + y;
+            if (dstY < swr->portY || dstY > swr->maxY - 1) continue;
+
+            int outerX0, outerX1, holeX0, holeX1;
+            if (!swrShaderEmuRippleRow(&ripple, dstY, &outerX0, &outerX1, &holeX0, &holeX1)) continue;
+            if (outerX0 < minX) outerX0 = minX;
+            if (outerX1 > maxRectX) outerX1 = maxRectX;
+            if (outerX0 < swr->portX) outerX0 = swr->portX;
+            if (outerX1 > lastX) outerX1 = lastX;
+
+            uintpixel_t* row = &swr->fb[(size_t) dstY * swr->fbPitch];
+            for (int x = outerX0; x <= outerX1; x++) {
+                if (x >= holeX0 && x <= holeX1) { x = holeX1; continue; }
+                const int ringAlpha = swrShaderEmuRippleAlpha(&ripple, x, dstY);
+                if (ringAlpha <= 0) continue;
+                swrBlitPixelEx(swr, &row[x], srcPixel, ringAlpha, maskBits);
+            }
+        }
+        return;
+    }
+
     for (int y = 0; y <= yd; y++) {
         swrDrawHLineInt(renderer, x1i, y1i + y, xd, pxcolor, pxcolor, alphaInt);
     }

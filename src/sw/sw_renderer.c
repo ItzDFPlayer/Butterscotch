@@ -1791,13 +1791,15 @@ static void SWRenderer_shaderSetUniformF(Renderer* renderer, int32_t handle, int
 
 static void SWRenderer_shaderSetUniformI(Renderer* renderer, int32_t handle, int32_t count, int32_t value1, int32_t value2, int32_t value3, int32_t value4)
 {
-    (void) renderer;
-    (void) handle;
-    (void) count;
-    (void) value1;
-    (void) value2;
-    (void) value3;
-    (void) value4;
+    // Integer uniforms (shd_ripple's rippleBanding, rippleFading) feed the same table
+    // as the float ones; the emulation reads them back as numbers.
+    SWRenderer* swr = (SWRenderer*) renderer;
+    if (handle < 0 || handle >= swr->shaderUniformCount) return;
+    int32_t values[4] = { value1, value2, value3, value4 };
+    if (count < 1) count = 1;
+    if (count > 4) count = 4;
+    for (int32_t i = 0; i < count; i++)
+        swr->shaderUniforms[handle].value[i] = (float) values[i];
 }
 
 static void SWRenderer_applyProjection(Renderer* renderer, const Matrix4f* worldToClip, const Matrix4f* idk)
