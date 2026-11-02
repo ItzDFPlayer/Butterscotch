@@ -117,6 +117,8 @@ static void SWRenderer_init(Renderer* renderer, DataWin* dataWin)
     swr->alphaTestEnabled = false;
     swr->alphaTestRef = 0;
     swr->writeMask = WRITE_MASK_ALL;
+    // No shader is bound until the game binds one; the emulation reads this.
+    swr->shaderIndex = -1;
     swrSetupBlendState(swr);
     
     for (size_t i = swr->originalTPagCount; i < dataWin->tpag.count; i++)
@@ -147,6 +149,9 @@ static void SWRenderer_beginFrame(Renderer* renderer, int32_t gameW, int32_t gam
     // The frame always starts on the host framebuffer, so the remembered target must
     // not survive into it: a stale id would be indexed on the next surface switch.
     swr->currentSurfaceIndex = -1;
+    // A shader bound in one frame must not leak into the next: the games always
+    // bind and reset around the draw that needs it.
+    swr->shaderIndex = -1;
     swr->blendMode = bm_normal;
     // GameMaker resets the blend unit at the start of every frame; the mask
     // scripts depend on that, otherwise their alpha-only writes leak into the
@@ -1704,9 +1709,9 @@ static bool SWRenderer_textureGetUVs(Renderer* renderer, uint32_t texID, float* 
 
 static void SWRenderer_textureSetStage(Renderer* renderer, int32_t slot, uint32_t texID)
 {
-    (void) renderer;
-    (void) slot;
-    (void) texID;
+    SWRenderer* swr = (SWRenderer*) renderer;
+    if (slot < 0 || slot >= SWR_SHADER_STAGES) return;
+    swr->shaderStages[slot] = texID;
 }
 
 static bool SWRenderer_shaderIsCompiled(Renderer* renderer, int32_t shader)
@@ -1724,42 +1729,64 @@ static bool SWRenderer_shadersSupported(void)
 
 static void SWRenderer_gpuSetShader(Renderer* renderer, int32_t shaderIndex)
 {
-    (void) renderer;
-    (void) shaderIndex;
+    SWRenderer* swr = (SWRenderer*) renderer;
+    if (swr->shaderIndex == shaderIndex) return;
+    swr->shaderIndex = shaderIndex;
+    // Stages belong to the program that was bound when they were set, so a new
+    // bind starts from nothing; the game re-binds them right after.
+    memset(swr->shaderStages, 0, sizeof(swr->shaderStages));
 }
 
 static void SWRenderer_gpuResetShader(Renderer* renderer)
 {
-    (void) renderer;
+    SWRenderer* swr = (SWRenderer*) renderer;
+    swr->shaderIndex = -1;
+}
+
+// Uniform handles are indices into a per-renderer name table, which is how the
+// value set later by shader_set_uniform_f() finds its way to the emulated
+// fragment. The names are stable for the lifetime of the renderer.
+static int32_t swrFindUniform(SWRenderer* swr, const char* name)
+{
+    for (int32_t i = 0; i < swr->shaderUniformCount; i++)
+    {
+        if (strcmp(swr->shaderUniforms[i].name, name) == 0) return i;
+    }
+    if (swr->shaderUniformCount >= SWR_SHADER_UNIFORMS) return -1;
+    int32_t index = swr->shaderUniformCount++;
+    snprintf(swr->shaderUniforms[index].name, sizeof(swr->shaderUniforms[index].name),
+             "%s", name);
+    return index;
 }
 
 static int32_t SWRenderer_shaderGetUniform(Renderer* renderer, int32_t shaderIndex, char* uniform)
 {
-    (void) renderer;
     (void) shaderIndex;
-    (void) uniform;
-    
-    return 0;
+    if (uniform == NULL) return -1;
+    return swrFindUniform((SWRenderer*) renderer, uniform);
 }
 
 static int32_t SWRenderer_shaderGetSamplerIndex(Renderer* renderer, int32_t shaderIndex, char* uniform)
 {
     (void) renderer;
     (void) shaderIndex;
-    (void) uniform;
-    
-    return 0;
+    if (uniform == NULL) return -1;
+    // Fixed slots, so that the emulation reads the texture the game bound here.
+    if (strcmp(uniform, "texGradient") == 0) return SWR_SHADER_SLOT_GRADIENT;
+    if (strcmp(uniform, "texBubble")   == 0) return SWR_SHADER_SLOT_BUBBLE;
+    if (strcmp(uniform, "texStars")    == 0) return SWR_SHADER_SLOT_STARS;
+    return -1;
 }
 
 static void SWRenderer_shaderSetUniformF(Renderer* renderer, int32_t handle, int32_t count, float value1, float value2, float value3, float value4)
 {
-    (void) renderer;
-    (void) handle;
-    (void) count;
-    (void) value1;
-    (void) value2;
-    (void) value3;
-    (void) value4;
+    SWRenderer* swr = (SWRenderer*) renderer;
+    if (handle < 0 || handle >= swr->shaderUniformCount) return;
+    float values[4] = { value1, value2, value3, value4 };
+    if (count < 1) count = 1;
+    if (count > 4) count = 4;
+    for (int32_t i = 0; i < count; i++)
+        swr->shaderUniforms[handle].value[i] = values[i];
 }
 
 static void SWRenderer_shaderSetUniformI(Renderer* renderer, int32_t handle, int32_t count, int32_t value1, int32_t value2, int32_t value3, int32_t value4)

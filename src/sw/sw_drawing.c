@@ -833,6 +833,40 @@ static void swrDrawSpriteInternal(
         return;
     }
 
+    // Shader draws: the fragment colour comes from the emulated shader at the
+    // destination pixel, so none of the fast paths below apply - they all copy the
+    // sprite's own colour. The sprite still supplies the coverage and alpha.
+    SWRShaderContext shaderCtx;
+    if (swrShaderEmuBegin(swr, &shaderCtx))
+    {
+        const bool shadedTint = !swrTintIsWhite(tintColor);
+
+        swr->pxWritten += (uint64_t) dw * (uint64_t) dh;
+        swr->pxScalarBlend += (uint64_t) dw * (uint64_t) dh;
+
+        fixedp_t ys2 = iys2;
+        for (int y = 0, ys = iys; y < dh; y++, ys += oys, ys2 += oys2)
+        {
+            uintpixel_t* dstline = &swr->fb[(dy + y) * swr->fbPitch + dx];
+            const uintpixel_t* srcline;
+            if (dh == sh)
+                srcline = &texture->buffer[(sy + ys) * texture->width + sx];
+            else
+                srcline = &texture->buffer[(sy + (int)(ys2 >> fp_prec)) * texture->width + sx];
+
+            fixedp_t xs2 = ixs2;
+            for (int x = 0; x < dw; x++, xs2 += oxs2)
+            {
+                if (!opaque(srcline[(int)(xs2 >> fp_prec)])) continue;
+                uint16_t shaded;
+                swrShaderEmuPixel(&shaderCtx, dx + x, dy + y, &shaded);
+                alphaBlend(&dstline[x], shadedTint ? tint(tintColor, shaded) : shaded,
+                           srcalpha, invalpha);
+            }
+        }
+        return;
+    }
+
     const bool unscaled = (sw == dw && sh == dh && !flipX && !flipY);
     const bool plainCopy = swrTintIsWhite(tintColor) && srcalpha > 253 && invalpha < 3;
 

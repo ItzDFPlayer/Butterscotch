@@ -10,6 +10,10 @@
 #define UNIMP() do { } while (0)
 #define UNIMP2() do { } while (0)
 
+// Capacity of the shader emulation state kept in SWRenderer.
+#define SWR_SHADER_STAGES   8
+#define SWR_SHADER_UNIFORMS 16
+
 // Provide PI if not specified
 #ifndef M_PI
 #define M_PI 3.1415926535897932384626
@@ -146,6 +150,19 @@ typedef struct
     // When non-zero every draw is written to the log, which is how a scene that
     // "renders wrong" gets compared against the instances that are on stage.
     int traceDraws;
+
+    // Minimal shader state: which shader is bound, the textures bound to its
+    // samplers with texture_set_stage, and the float uniforms set with
+    // shader_set_uniform_f. Nothing is compiled here - sw_shader_emu.c uses this to
+    // reproduce the handful of screen-space fragment shaders the games use.
+    int32_t shaderIndex;                    // -1 when nothing is bound
+    uint32_t shaderStages[SWR_SHADER_STAGES];
+    int32_t shaderUniformCount;
+    struct SwrShaderUniform
+    {
+        char name[24];
+        float value[4];
+    } shaderUniforms[SWR_SHADER_UNIFORMS];
 }
 SWRenderer;
 
@@ -170,5 +187,6 @@ FORCE_INLINE bool swrIsOnSurface(const SWRenderer* swr)
 #include "sw_surface.h"
 #include "sw_drawing.h"
 #include "sw_texture_lru.h"
+#include "sw_shader_emu.h"
 
 #endif//_SW_RENDERER_PRIVATE_H
