@@ -25,8 +25,9 @@
 // variable is restored.
 
 #define SAVE_STATE_MAGIC   "BSSTATE1"
-// 2: added the runtime layer section (element ids, order and layer state).
-#define SAVE_STATE_VERSION 2u
+// 3: values are read after instances and methods exist, so that an array holding a
+//    struct or a method restores instead of turning into undefined.
+#define SAVE_STATE_VERSION 3u
 
 // Value type tags used in the file. These mirror RValueType, but stay explicit so
 // the format does not silently change when a new GML type is added.
@@ -989,16 +990,20 @@ bool SaveState_save(Runner* runner, const char* path)
 
     wrScalars(&w, runner);
 
-    wrArrayTable(&w, &graph);
-    wrArrayValues(&w, &graph);
-    wrMethodTable(&w, &graph, runner->vmContext);
-
-    // Instance records, then their variables. Everything an instance variable can
-    // point at already exists at that point of the file.
+    // Instance records come first: a value can point at an instance (a struct value,
+    // or a method bound to an instance), so those records have to be in place before
+    // the first value is read back.
     const uint32_t instanceCount = (uint32_t) (arrlen(runner->instances) + arrlen(runner->structInstances));
     wrU32(&w, instanceCount);
     repeat(arrlen(runner->instances), i) wrInstanceFields(&w, runner->instances[i], false);
     repeat(arrlen(runner->structInstances), i) wrInstanceFields(&w, runner->structInstances[i], true);
+
+    // Then the shapes of every array and every method, and only after both tables are
+    // whole do the array elements follow - an element can be an array, a method or a
+    // struct, and all three have to resolve when it is read.
+    wrArrayTable(&w, &graph);
+    wrMethodTable(&w, &graph, runner->vmContext);
+    wrArrayValues(&w, &graph);
 
     repeat(arrlen(runner->instances), i)
     {
@@ -1637,9 +1642,7 @@ bool SaveState_load(Runner* runner, const char* path)
         free(bytes);
         return false;
     }
-    // Version 1 states predate the layer section. They still load, they just keep the
-    // old behaviour of letting the room rebuild hand out fresh layer element ids.
-    if (version == 0u || version > SAVE_STATE_VERSION)
+    if (version != SAVE_STATE_VERSION)
     {
         logError("SaveState: '%s' was written by another version (%u, expected %u)\n",
                  path, (unsigned) version, (unsigned) SAVE_STATE_VERSION);
@@ -1677,18 +1680,13 @@ bool SaveState_load(Runner* runner, const char* path)
     rdScalarsRest(&r, runner);
     if (!r.ok) goto failed;
 
-    rdArrayTable(&r, &loader);
-    rdArrayValues(&r, &loader);
-    if (!r.ok) goto failed;
-    rdMethodTable(&r, &loader);
-    if (!r.ok) goto failed;
-
     {
         const uint32_t instanceCount = rdU32(&r);
         if (!r.ok || instanceCount > 1000000u) goto failed;
 
-        // Pass 1: every instance record creates its instance, so struct references
-        // and staticParent pointers have something to resolve against in pass 2.
+        // Pass 1: every instance record creates its instance. Values can point at
+        // instances (a struct value, a method's bound self), so the instances have to
+        // exist before the first value is read.
         typedef struct
         {
             uint32_t instanceId;
@@ -1725,6 +1723,15 @@ bool SaveState_load(Runner* runner, const char* path)
             repeat(GML_ALARM_COUNT, a) inst->alarm[a] = (int32_t) alarms[a];
             arrput(pending, entry);
             if (!r.ok) break;
+        }
+
+        if (r.ok)
+        {
+            // Tables first, values second: an array element can be an array, a method
+            // or a struct, and all three have to resolve while it is read.
+            rdArrayTable(&r, &loader);
+            rdMethodTable(&r, &loader);
+            rdArrayValues(&r, &loader);
         }
 
         if (r.ok)
@@ -1767,39 +1774,41 @@ bool SaveState_load(Runner* runner, const char* path)
     rdDsPools(&r, &loader);
     if (!r.ok) goto failed;
 
-    if (version >= 2u)
-    {
-        // Layers last: the elements point at instances, and the rebuilt arrays and
-        // restored ids change what the draw list has to contain.
-        rdLayers(&r, runner);
-        if (!r.ok) goto failed;
-        runner->drawableListStructureDirty = true;
-        runner->drawableListSortDirty = true;
-    }
-    else
-    {
-        // Nothing recorded the layer element ids, so ids held in GML variables may
-        // point at the wrong element now. Say so instead of hanging later on.
-        logWarn("SaveState: '%s' predates layer ids in states; save it again if the "
-                "game starts behaving strangely\n", path);
-    }
+    // Layers last: the elements point at instances, and the rebuilt arrays and
+    // restored ids change what the draw list has to contain.
+    rdLayers(&r, runner);
+    if (!r.ok) goto failed;
+    runner->drawableListStructureDirty = true;
+    runner->drawableListSortDirty = true;
 
 failed:
     free(bytes);
 
-    // Arrays and methods carry a creator reference of zero while loading, so
-    // anything the state did not actually reference is dropped here.
+    // Arrays and methods are created with a creator reference of zero while loading,
+    // so an entry nothing points at has no owner. Those are deliberately left alone:
+    // an unreferenced array can still hold another table entry, so releasing it here
+    // would free a child this sweep has not reached yet and the table would then be
+    // walking dangling pointers. A state that leaves entries unreferenced is already
+    // inconsistent, and a handful of tiny leaks beats corrupting the heap mid-load.
+    int32_t orphanedArrays = 0;
     repeat(arrlen(loader.arrays), i)
     {
-        if (loader.arrays[i]->refCount == 0) GMLArray_decRef(loader.arrays[i]);
+        if (loader.arrays[i]->refCount == 0) orphanedArrays++;
     }
     arrfree(loader.arrays);
 
+    int32_t orphanedMethods = 0;
     repeat(arrlen(loader.methods), i)
     {
-        if (loader.methods[i]->refCount == 0) GMLMethod_decRef(loader.methods[i]);
+        if (loader.methods[i]->refCount == 0) orphanedMethods++;
     }
     arrfree(loader.methods);
+
+    if (orphanedArrays > 0 || orphanedMethods > 0)
+    {
+        logWarn("SaveState: '%s' left %d arrays and %d methods unreferenced\n",
+                path, (int) orphanedArrays, (int) orphanedMethods);
+    }
 
     if (!r.ok)
     {
