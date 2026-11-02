@@ -2,6 +2,8 @@
 #define _SW_RENDERER_H
 
 #include "renderer.h"
+// For uintpixel_t, which the overlay helpers take as a colour type.
+#include "pixel_convert.h"
 
 Renderer* SWRenderer_create(void);
 
@@ -61,6 +63,24 @@ void SWRenderer_drawOverlayText(Renderer* renderer, int x, int y, float scale, c
 // edge of the framebuffer. Used for the short-lived "FRAME SKIP ON/OFF" banner.
 void SWRenderer_drawOverlayTextRight(Renderer* renderer, int marginRight, int y, float scale,
                                      const char* text);
+
+// Same text in an explicit colour (RGB555, no alpha bit). The shadow stays black, so
+// a bright colour reads on both light and dark scenes; a dark colour would not, which
+// is why the menu marks its selection with colour instead of an inverted row.
+void SWRenderer_drawOverlayTextColor(Renderer* renderer, int x, int y, float scale,
+                                     const char* text, uintpixel_t color);
+
+// Width and line height of overlay text at the given scale, so a caller can size a
+// panel around it instead of guessing.
+int SWRenderer_measureOverlayText(Renderer* renderer, float scale, const char* text);
+int SWRenderer_overlayLineHeight(float scale);
+
+// Fills a rectangle straight into the framebuffer, blended towards `alpha` (0..256).
+// `color` is RGB555 without the alpha bit. Used to put a readable panel behind overlay
+// text; the game's own drawRectangle goes through the viewport transform, which is not
+// what screen-space overlay widgets want.
+void SWRenderer_fillOverlayRect(Renderer* renderer, int x, int y, int width, int height,
+                                uintpixel_t color, int alpha);
 
 // Writes the finished framebuffer to `path` as an RGBA PNG. Used by the debug
 // capture key so a bug can be reported without a screen grabber: the software

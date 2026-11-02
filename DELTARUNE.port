@@ -47,9 +47,11 @@ export BUTTERSCOTCH_FRAMESKIP=0
 
 # Buttons (GML key codes, as printed in the log next to each key press).
 # Here: L2 = Tab (9), R2 = Backspace (8), Select = right Ctrl (17), F9 = 120.
+# R2 opens the tool menu (save/load state, overlay, frame skip). The L2 overlay
+# toggle keeps working directly, and F5/F6/F7/F8 do the same from a keyboard.
 export BUTTERSCOTCH_OVERLAY_KEY=9
-export BUTTERSCOTCH_FRAMESKIP_KEY=8
 export BUTTERSCOTCH_CAPTURE_KEY=120
+export BUTTERSCOTCH_MENU_KEY=8
 
 # Save states: a snapshot of the whole VM (instances, globals, ds_* pools, the
 # room and the RNG) that can be reloaded in place, unlike the game's own save

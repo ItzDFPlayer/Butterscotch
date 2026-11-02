@@ -143,6 +143,14 @@ static int envKeyCode(const char* name, int fallback) {
     return key;
 }
 
+// "Was this key just pressed" for the configurable bindings. GML gives key codes 0
+// and 1 special meanings (vk_nokey answers "nothing is pressed", vk_anykey answers
+// "anything is pressed"), so neither can be used as a binding: a toggle bound to 0
+// fires on every idle frame. Everything is bindable from 2 upwards.
+static bool keyJustPressed(RunnerKeyboardState* kb, int32_t key) {
+    return key > VK_ANYKEY && RunnerKeyboard_checkPressed(kb, key);
+}
+
 // Start + shoulder on a mapped pad. On the handheld the physical buttons arrive as
 // keyboard events instead (no gamecontrollerdb.txt in the port folder, so nothing
 // is ever mapped and the pad path stays dead), so the same combo is also accepted
@@ -150,7 +158,7 @@ static int envKeyCode(const char* name, int fallback) {
 static bool startPlusShoulder(Runner* runner, int32_t shoulder, int32_t keyboardKey) {
     if (gamepadStartComboPressed(runner, shoulder)) return true;
     if (!RunnerKeyboard_check(runner->keyboard, VK_ENTER)) return false;
-    return RunnerKeyboard_checkPressed(runner->keyboard, keyboardKey);
+    return keyJustPressed(runner->keyboard, keyboardKey);
 }
 
 static size_t get_used_memory(void) {
@@ -883,6 +891,68 @@ static void prefetchRoomTextures(Runner* runner, Renderer* renderer, int32_t bar
 }
 #endif /* ENABLE_SW_RENDERER */
 
+// ===[ Tool menu ]===
+//
+// One place to reach the runtime tools, so the handheld does not need a button
+// combination per action. The list is deliberately short and every entry keeps its
+// direct binding as well.
+enum
+{
+    TOOL_MENU_SAVE = 0,
+    TOOL_MENU_LOAD,
+    TOOL_MENU_OVERLAY,
+    TOOL_MENU_FRAMESKIP,
+    TOOL_MENU_CLOSE,
+    TOOL_MENU_COUNT
+};
+
+#ifdef ENABLE_SW_RENDERER
+static void drawToolMenu(Renderer* renderer, int selected, bool overlayOn, bool frameSkipOn)
+{
+    char labels[TOOL_MENU_COUNT][40];
+    snprintf(labels[TOOL_MENU_SAVE], sizeof(labels[0]), "Save state");
+    snprintf(labels[TOOL_MENU_LOAD], sizeof(labels[0]), "Load state");
+    snprintf(labels[TOOL_MENU_OVERLAY], sizeof(labels[0]), "Overlay: %s", overlayOn ? "on" : "off");
+    snprintf(labels[TOOL_MENU_FRAMESKIP], sizeof(labels[0]), "Frame skip: %s", frameSkipOn ? "on" : "off");
+    snprintf(labels[TOOL_MENU_CLOSE], sizeof(labels[0]), "Close");
+
+    // Big enough to read at 640x480 and on a window scaled up from it.
+    const float scale = 0.45f;
+    const int lineHeight = SWRenderer_overlayLineHeight(scale);
+    const int padding = 6;
+    const int cursorWidth = SWRenderer_measureOverlayText(renderer, scale, "> ");
+
+    int textWidth = 0;
+    repeat(TOOL_MENU_COUNT, i) {
+        int width = SWRenderer_measureOverlayText(renderer, scale, labels[i]);
+        if (width > textWidth) textWidth = width;
+    }
+
+    const int panelX = 10;
+    const int panelY = 10;
+    const int panelWidth = textWidth + cursorWidth + padding * 2;
+    const int panelHeight = lineHeight * TOOL_MENU_COUNT + padding * 2;
+
+    // A dark panel first: these actions get used on top of bright rooms, where bare
+    // text would be unreadable.
+    SWRenderer_fillOverlayRect(renderer, panelX, panelY, panelWidth, panelHeight, 0x0000, 190);
+    // Light bar behind the selected row, so the cursor is visible even without colour.
+    SWRenderer_fillOverlayRect(renderer, panelX + 1, panelY + padding + lineHeight * selected - 1,
+                               panelWidth - 2, lineHeight, 0x52AA, 210);
+
+    repeat(TOOL_MENU_COUNT, i) {
+        const int rowY = panelY + padding + lineHeight * i;
+        const bool isSelected = (i == selected);
+        // Yellow marks the selection: black text on a light bar would lose the shadow
+        // that keeps the overlay readable, and an inverted row needs a second font.
+        if (isSelected)
+            SWRenderer_drawOverlayTextColor(renderer, panelX + padding, rowY, scale, "> ", 0xFFE0);
+        SWRenderer_drawOverlayTextColor(renderer, panelX + padding + cursorWidth, rowY, scale,
+                                        labels[i], isSelected ? 0xFFE0 : 0x7FFF);
+    }
+}
+#endif /* ENABLE_SW_RENDERER */
+
 // ===[ MAIN ]===
 int loop(CommandLineArgs args, const char *argv0) {
     // The Miyoo release launcher only passes "--renderer software data.win". The
@@ -1547,7 +1617,9 @@ int loop(CommandLineArgs args, const char *argv0) {
         bool showPerfOverlay = envFlagSet("BUTTERSCOTCH_PERF_OVERLAY");
         bool frameSkipEnabled = envFlagSet("BUTTERSCOTCH_FRAMESKIP");
         const int32_t overlayToggleKey = envKeyCode("BUTTERSCOTCH_OVERLAY_KEY", VK_TAB);
-        const int32_t frameSkipToggleKey = envKeyCode("BUTTERSCOTCH_FRAMESKIP_KEY", VK_BACKSPACE);
+        // VK_NOKEY by default: the single-key frame-skip shortcut moved into the menu,
+        // and Start + R2 / F8 still toggle it directly.
+        const int32_t frameSkipToggleKey = envKeyCode("BUTTERSCOTCH_FRAMESKIP_KEY", VK_NOKEY);
         // Debug capture (PNG + one draw trace line per draw). F9 by default; on the
         // handheld, where F9 does not exist, point this at a real button.
         const int32_t captureKey = envKeyCode("BUTTERSCOTCH_CAPTURE_KEY", VK_F9);
@@ -1556,6 +1628,10 @@ int loop(CommandLineArgs args, const char *argv0) {
         // game save, so it can be taken anywhere and reloaded in place.
         const int32_t saveStateKey = envKeyCode("BUTTERSCOTCH_SAVESTATE_KEY", VK_F5);
         const int32_t loadStateKey = envKeyCode("BUTTERSCOTCH_LOADSTATE_KEY", VK_F6);
+        // Tool menu: R2 on the handheld (which arrives as Backspace), Backspace on a
+        // keyboard. It lists the actions above so they can be reached without
+        // remembering a binding each, and the bindings themselves keep working.
+        const int32_t menuKey = envKeyCode("BUTTERSCOTCH_MENU_KEY", VK_BACKSPACE);
         // Headless equivalents, for reproducing a save/load pair without a keyboard.
         int32_t saveStateFrame = -1;
         int32_t loadStateFrame = -1;
@@ -1601,6 +1677,15 @@ int loop(CommandLineArgs args, const char *argv0) {
         // toggle, because otherwise there is no feedback on a screen without a console.
         char skipBanner[24] = {0};
         uint64_t skipBannerUntil = 0;
+        // Tool menu state. The game keeps stepping while the menu is open (so an
+        // animation does not freeze mid-action), but its input is masked out for the
+        // step, otherwise navigating the menu would also walk the player around.
+        bool menuOpen = false;
+        int menuIndex = 0;
+        // Set by the menu so saving/loading reuses the exact banner and logging of the
+        // direct keys instead of a second implementation.
+        bool menuSaveRequest = false;
+        bool menuLoadRequest = false;
         bool captureRequested = false;
         bool traceRequested = false;
         // Set when this iteration deliberately draws nothing (adaptive frame skip).
@@ -1648,6 +1733,7 @@ int loop(CommandLineArgs args, const char *argv0) {
             bool enteringPause = runner->paused && !wasPaused;
             bool shouldStep = !runner->paused;
             bool shouldRender = !runner->paused || enteringPause;
+
             if (runner->debugMode && runner->paused) {
                 shouldStep = RunnerKeyboard_checkPressed(runner->keyboard, 'O');
                 if (shouldStep) {
@@ -1671,6 +1757,64 @@ int loop(CommandLineArgs args, const char *argv0) {
                 // Process input recording/playback (must happen after platformHandleEvents, before Runner_step)
                 InputRecording_processFrame(globalInputRecording, runner->keyboard, inputFrameCount++);
             }
+
+            // Tool menu input. Sits after the input-recording hook so a recorded
+            // session can drive it, and before the step so the menu can mask the keys it
+            // used (Backspace is R2, and the arrows/Enter also move and confirm).
+            {
+                if (keyJustPressed(runner->keyboard, menuKey)) {
+                    menuOpen = !menuOpen;
+                    menuIndex = 0;
+                    logInfo("Tool menu: %s\n", menuOpen ? "open" : "closed");
+                }
+
+                if (menuOpen) {
+                    if (keyJustPressed(runner->keyboard, VK_UP))
+                        menuIndex = (menuIndex + TOOL_MENU_COUNT - 1) % TOOL_MENU_COUNT;
+                    if (keyJustPressed(runner->keyboard, VK_DOWN))
+                        menuIndex = (menuIndex + 1) % TOOL_MENU_COUNT;
+                    // W/S as well, because some pad mappings deliver the d-pad that way.
+                    if (keyJustPressed(runner->keyboard, 'W'))
+                        menuIndex = (menuIndex + TOOL_MENU_COUNT - 1) % TOOL_MENU_COUNT;
+                    if (keyJustPressed(runner->keyboard, 'S'))
+                        menuIndex = (menuIndex + 1) % TOOL_MENU_COUNT;
+
+                    if (keyJustPressed(runner->keyboard, VK_ESCAPE) ||
+                        keyJustPressed(runner->keyboard, 'X')) {
+                        menuOpen = false;
+                    }
+
+                    const bool confirm = keyJustPressed(runner->keyboard, VK_ENTER) ||
+                                         keyJustPressed(runner->keyboard, VK_SPACE) ||
+                                         keyJustPressed(runner->keyboard, 'Z');
+                    if (confirm && menuOpen) {
+                        switch (menuIndex) {
+                            case TOOL_MENU_SAVE:
+                                menuSaveRequest = true;
+                                break;
+                            case TOOL_MENU_LOAD:
+                                menuLoadRequest = true;
+                                break;
+                            case TOOL_MENU_OVERLAY:
+                                showPerfOverlay = !showPerfOverlay;
+                                logInfo("Overlay: %s\n", showPerfOverlay ? "on" : "off");
+                                break;
+                            case TOOL_MENU_FRAMESKIP:
+                                frameSkipEnabled = !frameSkipEnabled;
+                                frameSkipRun = 0;
+                                snprintf(skipBanner, sizeof(skipBanner), "FRAME SKIP %s",
+                                         frameSkipEnabled ? "ON" : "OFF");
+                                skipBannerUntil = nowNanos() + 1500000000ull;
+                                logInfo("Frame skip: %s\n", frameSkipEnabled ? "on" : "off");
+                                break;
+                            default:
+                                menuOpen = false;
+                                break;
+                        }
+                    }
+                }
+            }
+
 
             // Go to next room
             if (RunnerKeyboard_checkPressed(runner->keyboard, VK_PAGEUP)) {
@@ -1786,7 +1930,12 @@ int loop(CommandLineArgs args, const char *argv0) {
             bool currentKeyPressed[GML_KEY_COUNT];
             bool currentKeyReleased[GML_KEY_COUNT];
 
-            if (freeCamActive) {
+            // The free camera and the tool menu both need the keys themselves, and both
+            // want the game to run as if nothing were held. The game still steps, so
+            // animations keep moving; it just sees no input.
+            const bool suppressGameInput = freeCamActive || menuOpen;
+
+            if (suppressGameInput) {
                 // THIS IS A HACK!! We don't want to pass keys to the runner, but we DO want to keep it so we can hold the arrow keys to move the camera
                 memcpy(currentKeyDown, runner->keyboard->keyDown, sizeof(runner->keyboard->keyDown));
                 memcpy(currentKeyPressed, runner->keyboard->keyPressed, sizeof(runner->keyboard->keyPressed));
@@ -1803,7 +1952,7 @@ int loop(CommandLineArgs args, const char *argv0) {
                 perfAfterStep = nowNanos();
             }
 
-            if (freeCamActive) {
+            if (suppressGameInput) {
                 memcpy(runner->keyboard->keyDown, currentKeyDown, sizeof(runner->keyboard->keyDown));
                 memcpy(runner->keyboard->keyPressed, currentKeyPressed, sizeof(runner->keyboard->keyPressed));
                 memcpy(runner->keyboard->keyReleased, currentKeyReleased, sizeof(runner->keyboard->keyReleased));
@@ -1814,13 +1963,13 @@ int loop(CommandLineArgs args, const char *argv0) {
                 // after the step because input recordings are injected just before it.
                 if (startPlusShoulder(runner, GP_SHOULDERLB, VK_PAGEUP) ||
                     RunnerKeyboard_checkPressed(runner->keyboard, VK_F7) ||
-                    RunnerKeyboard_checkPressed(runner->keyboard, overlayToggleKey)) {
+                    keyJustPressed(runner->keyboard, overlayToggleKey)) {
                     showPerfOverlay = !showPerfOverlay;
                     logInfo("Overlay: %s\n", showPerfOverlay ? "on" : "off");
                 }
                 if (startPlusShoulder(runner, GP_SHOULDERRB, VK_PAGEDOWN) ||
                     RunnerKeyboard_checkPressed(runner->keyboard, VK_F8) ||
-                    RunnerKeyboard_checkPressed(runner->keyboard, frameSkipToggleKey)) {
+                    keyJustPressed(runner->keyboard, frameSkipToggleKey)) {
                     frameSkipEnabled = !frameSkipEnabled;
                     frameSkipRun = 0;
                     snprintf(skipBanner, sizeof(skipBanner), "FRAME SKIP %s",
@@ -1837,25 +1986,29 @@ int loop(CommandLineArgs args, const char *argv0) {
                 // always sits on a frame boundary, never in the middle of a script.
                 // The headless frame hooks fire once: a load rewinds frameCount, so a
                 // "load at frame N" that kept testing for N would load forever.
-                const bool saveStateNow = startPlusShoulder(runner, GP_SHOULDERL, saveStateKey) ||
-                    RunnerKeyboard_checkPressed(runner->keyboard, saveStateKey) ||
+                const bool saveStateNow = menuSaveRequest ||
+                    startPlusShoulder(runner, GP_SHOULDERL, saveStateKey) ||
+                    keyJustPressed(runner->keyboard, saveStateKey) ||
                     (!saveStateFrameDone && saveStateFrame >= 0 && runner->frameCount == saveStateFrame);
                 if (saveStateNow) {
+                    menuSaveRequest = false;
                     if (saveStateFrame >= 0) saveStateFrameDone = true;
                     const bool saved = SaveState_save(runner, statePath);
                     snprintf(skipBanner, sizeof(skipBanner), "%s", saved ? "STATE SAVED" : "STATE FAILED");
                     skipBannerUntil = nowNanos() + 1500000000ull;
                 }
-                const bool loadStateNow = startPlusShoulder(runner, GP_SHOULDERR, loadStateKey) ||
-                    RunnerKeyboard_checkPressed(runner->keyboard, loadStateKey) ||
+                const bool loadStateNow = menuLoadRequest ||
+                    startPlusShoulder(runner, GP_SHOULDERR, loadStateKey) ||
+                    keyJustPressed(runner->keyboard, loadStateKey) ||
                     (!loadStateFrameDone && loadStateFrame >= 0 && runner->frameCount == loadStateFrame);
                 if (loadStateNow) {
+                    menuLoadRequest = false;
                     if (loadStateFrame >= 0) loadStateFrameDone = true;
                     const bool loaded = SaveState_load(runner, statePath);
                     snprintf(skipBanner, sizeof(skipBanner), "%s", loaded ? "STATE LOADED" : "NO STATE");
                     skipBannerUntil = nowNanos() + 1500000000ull;
                 }
-                if (gfx == SOFTWARE && (RunnerKeyboard_checkPressed(runner->keyboard, captureKey) ||
+                if (gfx == SOFTWARE && (keyJustPressed(runner->keyboard, captureKey) ||
                                         captureThisFrame)) {
                     captureRequested = true;
                     traceRequested = true;
@@ -2096,6 +2249,13 @@ int loop(CommandLineArgs args, const char *argv0) {
                 if (gfx == SOFTWARE && skipBanner[0] != '\0' && nowNanos() < skipBannerUntil) {
                     SWRenderer_drawOverlayTextRight(renderer, 4, 4, 0.28f, skipBanner);
                 }
+
+                // Tool menu, drawn last so it sits over the fps overlay and the banner.
+#ifdef ENABLE_SW_RENDERER
+                if (gfx == SOFTWARE && menuOpen) {
+                    drawToolMenu(renderer, menuIndex, showPerfOverlay, frameSkipEnabled);
+                }
+#endif
 
                 // Opt-in draw cost report (BUTTERSCOTCH_PROFILE_DRAWS=1): names the
                 // texture-page items that actually spend the frame's draw time.

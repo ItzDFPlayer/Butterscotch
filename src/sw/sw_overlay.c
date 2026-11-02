@@ -8,6 +8,9 @@
 #include "sw_renderer.h"
 #include "sw_renderer_private.h"
 
+// Widest line of a block of overlay text, defined below with the right-aligned text.
+static float swrOverlayLineWidth(const char* text, float scale);
+
 // Blits one glyph of the debug font at `penX`,`top`, scaled by `scale` (0..1).
 static void swrOverlayGlyph(SWRenderer* swr, const DebugFontGlyphEntry* g,
                             float penX, float top, float scale, uintpixel_t color,
@@ -47,6 +50,12 @@ static void swrOverlayGlyph(SWRenderer* swr, const DebugFontGlyphEntry* g,
 
 void SWRenderer_drawOverlayText(Renderer* renderer, int x, int y, float scale, const char* text)
 {
+    SWRenderer_drawOverlayTextColor(renderer, x, y, scale, text, 0x7FFF);
+}
+
+void SWRenderer_drawOverlayTextColor(Renderer* renderer, int x, int y, float scale,
+                                     const char* text, uintpixel_t color)
+{
     if (renderer == nullptr || text == nullptr) return;
 
     SWRenderer* swr = (SWRenderer*) renderer;
@@ -55,7 +64,7 @@ void SWRenderer_drawOverlayText(Renderer* renderer, int x, int y, float scale, c
     // Shadow pass first, then the text, so a glyph never covers its own shadow.
     for (int pass = 0; pass < 2; pass++)
     {
-        uintpixel_t color = (pass == 0) ? 0x0000 : 0x7FFF;
+        uintpixel_t passColor = (pass == 0) ? 0x0000 : color;
         int shadowDx = (pass == 0) ? 1 : 0;
         int shadowDy = (pass == 0) ? 1 : 0;
 
@@ -72,8 +81,56 @@ void SWRenderer_drawOverlayText(Renderer* renderer, int x, int y, float scale, c
             if ((unsigned char) *c < DEBUGFONT_FIRST_CP || (unsigned char) *c > DEBUGFONT_LAST_CP) continue;
 
             const DebugFontGlyphEntry* g = &debugFontGlyphs[(unsigned char) *c - DEBUGFONT_FIRST_CP];
-            swrOverlayGlyph(swr, g, penX, top, scale, color, shadowDx, shadowDy);
+            swrOverlayGlyph(swr, g, penX, top, scale, passColor, shadowDx, shadowDy);
             penX += (float) g->xadvance * scale;
+        }
+    }
+}
+
+int SWRenderer_measureOverlayText(Renderer* renderer, float scale, const char* text)
+{
+    (void) renderer;
+    if (text == nullptr || scale <= 0.0f) return 0;
+    return (int) swrOverlayLineWidth(text, scale);
+}
+
+int SWRenderer_overlayLineHeight(float scale)
+{
+    if (scale <= 0.0f) return 0;
+    return (int) ceilf((float) DEBUGFONT_LINE_HEIGHT * scale);
+}
+
+void SWRenderer_fillOverlayRect(Renderer* renderer, int x, int y, int width, int height,
+                                uintpixel_t color, int alpha)
+{
+    if (renderer == nullptr || width <= 0 || height <= 0) return;
+
+    SWRenderer* swr = (SWRenderer*) renderer;
+    if (swr->fb == nullptr) return;
+
+    if (alpha < 0) alpha = 0;
+    if (alpha > 256) alpha = 256;
+    if (alpha == 0) return;
+
+    int x0 = x < 0 ? 0 : x;
+    int y0 = y < 0 ? 0 : y;
+    int x1 = x + width;
+    int y1 = y + height;
+    if (x1 > (int) swr->width) x1 = (int) swr->width;
+    if (y1 > (int) swr->height) y1 = (int) swr->height;
+    if (x0 >= x1 || y0 >= y1) return;
+
+    // The overlay draws into the framebuffer directly, so the same blend the sprite
+    // path uses applies here; the alpha bit marks the source as visible.
+    const uintpixel_t source = (uintpixel_t) (color | 0x8000);
+    const int dstAlpha = 256 - alpha;
+
+    for (int py = y0; py < y1; py++)
+    {
+        uintpixel_t* row = &swr->fb[(size_t) py * swr->fbPitch];
+        for (int px = x0; px < x1; px++)
+        {
+            alphaBlend(&row[px], source, alpha, dstAlpha);
         }
     }
 }
