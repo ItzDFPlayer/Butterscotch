@@ -1550,14 +1550,24 @@ int loop(CommandLineArgs args, const char *argv0) {
         // Debug capture (PNG + one draw trace line per draw). F9 by default; on the
         // handheld, where F9 does not exist, point this at a real button.
         const int32_t captureKey = envKeyCode("BUTTERSCOTCH_CAPTURE_KEY", VK_F9);
-        // Same capture, but at a fixed frame, so a headless run can produce a PNG of a
-        // specific moment (a room that only appears late, an effect that is hard to
-        // reach by hand). Parse errors simply disable it.
-        int32_t captureFrame = -1;
+        // Same capture, but at fixed frames, so a headless run can produce PNGs of
+        // specific moments (a room that only appears late, an effect that is hard to
+        // reach by hand). Comma-separated: "120,240,360". Parse errors just disable it.
+        int32_t captureFrames[32];
+        int captureFrameCount = 0;
         {
             const char* captureFrameEnv = getenv("BUTTERSCOTCH_CAPTURE_FRAME");
-            if (captureFrameEnv != nullptr && captureFrameEnv[0] != '\0')
-                captureFrame = (int32_t) strtol(captureFrameEnv, nullptr, 10);
+            if (captureFrameEnv != nullptr && captureFrameEnv[0] != '\0') {
+                const char* p = captureFrameEnv;
+                while (*p != '\0' && captureFrameCount < 32) {
+                    char* end = nullptr;
+                    long value = strtol(p, &end, 10);
+                    if (end == p) break;
+                    captureFrames[captureFrameCount++] = (int32_t) value;
+                    p = end;
+                    while (*p == ',' || *p == ' ') p++;
+                }
+            }
         }
         // "FRAME SKIP ON/OFF" shown in the top right corner for a moment after the
         // toggle, because otherwise there is no feedback on a screen without a console.
@@ -1790,8 +1800,12 @@ int loop(CommandLineArgs args, const char *argv0) {
                     skipBannerUntil = nowNanos() + 1500000000ull;
                     logInfo("Frame skip: %s\n", frameSkipEnabled ? "on" : "off");
                 }
+                bool captureThisFrame = false;
+                repeat(captureFrameCount, i) {
+                    if (runner->frameCount == captureFrames[i]) { captureThisFrame = true; break; }
+                }
                 if (gfx == SOFTWARE && (RunnerKeyboard_checkPressed(runner->keyboard, captureKey) ||
-                                        (captureFrame >= 0 && runner->frameCount == captureFrame))) {
+                                        captureThisFrame)) {
                     captureRequested = true;
                     traceRequested = true;
                 }

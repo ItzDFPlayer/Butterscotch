@@ -20138,15 +20138,37 @@ static RValue builtin_parameter_string(VMContext* ctx, RValue* args, int32_t arg
     return RValue_makeString(ctx->runner->gameArgs[index]);
 }
 
+// shader_set()/shader_reset() are accepted but nothing is compiled: the software
+// renderer has no shaders, so any effect that lives in one renders unshaded. With
+// BUTTERSCOTCH_LOG_SHADERS=1 the name of each shader that gets bound is logged, which
+// is how to tell whether a missing effect is shader-only or a plain draw.
+static void shaderLogBinding(VMContext* ctx, int32_t shaderId)
+{
+    static int enabled = -1;
+    if (enabled < 0) {
+        const char* env = getenv("BUTTERSCOTCH_LOG_SHADERS");
+        enabled = (env != nullptr && env[0] != '\0' && env[0] != '0') ? 1 : 0;
+    }
+    if (!enabled) return;
+
+    const char* name = "?";
+    DataWin* dw = ctx->runner->dataWin;
+    if (shaderId >= 0 && dw != nullptr && (uint32_t) shaderId < dw->shdr.count &&
+        dw->shdr.shaders[shaderId].name != nullptr)
+        name = dw->shdr.shaders[shaderId].name;
+    logInfo("Shader %s [%d] in %s\n", shaderId < 0 ? "reset" : "set", (int) shaderId, name);
+}
+
 static RValue builtin_shader_set(VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) {
     int32_t ShaderID = (int32_t) RValue_toReal(args[0]);
-    // logInfo("Set Shader ID %u\n", ShaderID);
+    shaderLogBinding(ctx, ShaderID);
     // gpuSetShader
     ctx->runner->renderer->vtable->gpuSetShader(ctx->runner->renderer, ShaderID);
     return RValue_makeUndefined();
 }
 
 static RValue builtin_shader_reset(VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) {
+    shaderLogBinding(ctx, -1);
     ctx->runner->renderer->vtable->gpuResetShader(ctx->runner->renderer);
     return RValue_makeUndefined();
 }

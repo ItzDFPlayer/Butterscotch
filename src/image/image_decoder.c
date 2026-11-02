@@ -214,7 +214,21 @@ static QoiOpResult qoiStreamNextOpcode(QoiStream* s) {
 }
 
 // Emits `pixels` pixels of the current colour run into dst (RGB565 or RGBA8).
-static bool qoiStreamFill(QoiStream* s, void* dst, size_t pixels, bool to565) {
+//
+// `imageWidth` (0 = unknown) enables alpha dithering: 16bpp output has room for a
+// single alpha bit per pixel, so rounding partial alpha at 50% erases everything
+// soft. Deltarune's chapter 5 logo glow is three blurred copies of the logo whose
+// halo never reaches 50%, so it vanished completely. Comparing the source alpha
+// against a repeating 4x4 threshold instead keeps a proportional share of the
+// pixels and the shape survives, stippled.
+static const uint8_t qoiAlphaDither[4][4] = {
+    {  0,  8,  2, 10 },
+    { 12,  4, 14,  6 },
+    {  3, 11,  1,  9 },
+    { 15,  7, 13,  5 },
+};
+
+static bool qoiStreamFill(QoiStream* s, void* dst, size_t pixels, bool to565, int imageWidth) {
     size_t emitted = 0;
 
     while (emitted < pixels) {
@@ -231,20 +245,35 @@ static bool qoiStreamFill(QoiStream* s, void* dst, size_t pixels, bool to565) {
 
         if (to565) {
             // Match swrConvertPixelTexture()/abgr8888_to_rgb1555: RGB555 + alpha bit.
-            uint16_t px = (uint16_t) ((s->b >> 3) | ((s->g >> 3) << 5) | ((s->r >> 3) << 10) | ((s->a >> 7) << 15));
+            uint16_t rgb = (uint16_t) ((s->b >> 3) | ((s->g >> 3) << 5) | ((s->r >> 3) << 10));
             uint16_t* out = (uint16_t*) dst + emitted;
             size_t left = emit;
-            while (left >= 4) {
-                out[0] = px;
-                out[1] = px;
-                out[2] = px;
-                out[3] = px;
-                out += 4;
-                left -= 4;
-            }
-            while (left > 0) {
-                *out++ = px;
-                left--;
+
+            if (imageWidth > 0 && s->a > 7 && s->a < 248) {
+                // Partial alpha: decide each pixel separately.
+                size_t index = emitted;
+                while (left > 0) {
+                    const int x = (int) (index % (size_t) imageWidth);
+                    const int y = (int) (index / (size_t) imageWidth) & 3;
+                    const int threshold = (int) qoiAlphaDither[y][x & 3] * 16;
+                    *out++ = (uint16_t) (rgb | (s->a > threshold ? 0x8000 : 0));
+                    index++;
+                    left--;
+                }
+            } else {
+                uint16_t px = (uint16_t) (rgb | (s->a > 7 ? 0x8000 : 0));
+                while (left >= 4) {
+                    out[0] = px;
+                    out[1] = px;
+                    out[2] = px;
+                    out[3] = px;
+                    out += 4;
+                    left -= 4;
+                }
+                while (left > 0) {
+                    *out++ = px;
+                    left--;
+                }
             }
         } else {
             uint32_t px = (uint32_t) s->r | ((uint32_t) s->g << 8) | ((uint32_t) s->b << 16) | ((uint32_t) s->a << 24);
@@ -294,7 +323,7 @@ static void* decodeQoiCore(const uint8_t* data, size_t dataSize, int* outW, int*
 
     QoiStream stream;
     qoiStreamReset(&stream, data, dataSize);
-    if (!qoiStreamFill(&stream, out, pixelCount, to565)) {
+    if (!qoiStreamFill(&stream, out, pixelCount, to565, to565 ? width : 0)) {
         free(out);
         return nullptr;
     }
@@ -646,7 +675,12 @@ uint16_t* ImageDecoder_decodeToRgb565(const uint8_t* blob, size_t blobSize, bool
         uint8_t g = pixels[i * 4 + 1];
         uint8_t b = pixels[i * 4 + 2];
         uint8_t a = pixels[i * 4 + 3];
-        out[i] = (uint16_t) ((b >> 3) | ((g >> 3) << 5) | ((r >> 3) << 10) | ((a >> 7) << 15));
+        uint16_t rgb = (uint16_t) ((b >> 3) | ((g >> 3) << 5) | ((r >> 3) << 10));
+        // Same dithered alpha as the QOI path above.
+        const int x = (int) (i % (size_t) w);
+        const int y = (int) (i / (size_t) w) & 3;
+        const int threshold = (int) qoiAlphaDither[y][x & 3] * 16;
+        out[i] = (uint16_t) (rgb | ((a >= 248 || (a > 7 && a > threshold)) ? 0x8000 : 0));
     }
     free(pixels);
 
@@ -693,7 +727,7 @@ bool ImageDecoder_buildCheckpoints(const uint8_t* blob, size_t blobSize,
         int rows = height - firstRow;
         if (rows > stripRows) rows = stripRows;
 
-        if (!qoiStreamFill(&stream, scratch, (size_t) width * (size_t) rows, true)) {
+        if (!qoiStreamFill(&stream, scratch, (size_t) width * (size_t) rows, true, 0)) {
             ok = false;
             break;
         }
@@ -726,5 +760,7 @@ bool ImageDecoder_decodeStrip(const uint8_t* blob, size_t blobSize, const QoiChe
     stream.a = start->rgba[3];
     memcpy(stream.index, start->index, sizeof(stream.index));
 
-    return qoiStreamFill(&stream, dst, pixelCount, true);
+    // Strips restart at their own row 0; the 4-row dither phase is preserved as
+    // long as the strip height is a multiple of four (it is).
+    return qoiStreamFill(&stream, dst, pixelCount, true, width);
 }
