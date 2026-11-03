@@ -639,6 +639,40 @@ FORCE_INLINE bool swrBlendIsAdditive(const SWRenderer* swr)
     return swr->blendMode == bm_add;
 }
 
+// True when any of the eight source pixels carries the alpha bit. Sprite draws are
+// silhouettes inside a rectangle, so a lot of eight-pixel groups are pure padding.
+// swrBlendVec() computes every lane and only merges the destination back afterwards,
+// so blending a transparent group is a no-op that still costs the whole blend; skip
+// it instead. The output is identical, not merely similar.
+FORCE_INLINE bool swrVecAnyOpaque(swrVec8 src)
+{
+    const swrVec8 bits = src & swrSplat8(0x8000);
+    // Reduce through the two halves: the GCC/clang vector extensions this file is
+    // written against have no movemask.
+    uint64_t halves[2];
+    memcpy(halves, &bits, sizeof(halves));
+    return (halves[0] | halves[1]) != 0;
+}
+
+// True when the row holds at least one opaque pixel. The middle of a sprite answers
+// on the first group, so this costs a few cycles; the fully transparent margin rows
+// pay for the scan and then skip a whole destination row of blending.
+FORCE_INLINE bool swrRowAnyOpaque(const uintpixel_t* row, int count)
+{
+    int x = 0;
+    for (; x + 8 <= count; x += 8)
+    {
+        swrVec8 s;
+        memcpy(&s, row + x, sizeof(s));
+        if (swrVecAnyOpaque(s)) return true;
+    }
+    for (; x < count; x++)
+    {
+        if (opaque(row[x])) return true;
+    }
+    return false;
+}
+
 // Blends a scaled (nearest-neighbour) sprite rectangle eight pixels at a time.
 // The gather is still scalar - source columns are stepped by a fixed-point delta -
 // but it is a handful of adds and loads per eight pixels, while the blend maths that
@@ -655,30 +689,62 @@ static void swrBlendSpriteScaledVector(SWRenderer* swr, int dx, int dy, int dw, 
     const swrVec8 tintG = swrSplat8((uint16_t) ((tintColor >> 5) & 0x1F));
     const swrVec8 tintB = swrSplat8((uint16_t) (tintColor & 0x1F));
 
+    // Columns this draw actually samples, so the padding test below only looks at
+    // the strip it reads rather than the whole texture page.
+    const int32_t firstColumn = ixs2 >> fp_prec;
+    const int32_t lastColumn = (ixs2 + (int32_t) (dw - 1) * oxs2) >> fp_prec;
+    const int scanStart = sx + (firstColumn < lastColumn ? firstColumn : lastColumn);
+    const int scanCount = (firstColumn < lastColumn ? lastColumn - firstColumn
+                                                   : firstColumn - lastColumn) + 1;
+    const bool scanInBounds = scanStart >= 0 && scanCount > 0
+                              && scanStart + scanCount <= (int) texture->width;
+
     int32_t ys2 = iys2;
+    // An upscaled draw samples the same source row many times over - a 600px strip
+    // stretched to 9600 tests each row sixteen times - so remember the answer.
+    int checkedRow = INT_MIN;
+    bool checkedRowHasPixels = true;
+
     for (int y = 0, ys = iys; y < dh; y++, ys += oys, ys2 += oys2)
     {
-        const uintpixel_t* srcline;
         uintpixel_t* dstline = &swr->fb[(dy + y) * swr->fbPitch + dx];
-        if (dh == sh_val)
-            srcline = &texture->buffer[(sy + ys) * texture->width + sx];
-        else
-            srcline = &texture->buffer[(sy + (int)(ys2 >> fp_prec)) * texture->width + sx];
+        const int srcRow = (dh == sh_val) ? sy + ys : sy + (int) (ys2 >> fp_prec);
+        if (scanInBounds && srcRow != checkedRow)
+        {
+            checkedRow = srcRow;
+            checkedRowHasPixels = swrRowAnyOpaque(&texture->buffer[srcRow * texture->width + scanStart],
+                                                  scanCount);
+        }
+        if (!checkedRowHasPixels) continue;
+        const uintpixel_t* srcline = &texture->buffer[srcRow * texture->width + sx];
 
         int32_t xs2 = ixs2;
         int x = 0;
 
         for (; x + 8 <= dw; x += 8)
         {
-            uint16_t gathered[8];
-            for (int k = 0; k < 8; k++)
-            {
-                gathered[k] = srcline[(int)(xs2 >> fp_prec)];
-                xs2 += oxs2;
-            }
-
             swrVec8 s, d;
-            memcpy(&s, gathered, sizeof(s));
+            const int32_t groupFirst = xs2 >> fp_prec;
+            if ((xs2 + 7 * oxs2) >> fp_prec == groupFirst)
+            {
+                // A wide upscale: all eight destination pixels sample one texel (the
+                // final battle's background bands stretch a 600px strip to 9000px, so
+                // every group is a single source pixel). Splat it rather than running
+                // the eight-step gather, which is half of this loop's cost.
+                s = swrSplat8(srcline[groupFirst]);
+                xs2 += oxs2 * 8;
+            }
+            else
+            {
+                uint16_t gathered[8];
+                for (int k = 0; k < 8; k++)
+                {
+                    gathered[k] = srcline[(int)(xs2 >> fp_prec)];
+                    xs2 += oxs2;
+                }
+                memcpy(&s, gathered, sizeof(s));
+            }
+            if (!swrVecAnyOpaque(s)) continue;
             memcpy(&d, dstline + x, sizeof(d));
 
             swrVec8 out = swrBlendVec(s, d, tintR, tintG, tintB, applyTint, additive, srcalpha, dstalpha);
@@ -710,12 +776,14 @@ static void swrBlendSpriteVector(SWRenderer* swr, int dx, int dy, int dw, int dh
     {
         const uintpixel_t* srcline = &texture->buffer[(sy + y) * texture->width + sx];
         uintpixel_t* dstline = &swr->fb[(dy + y) * swr->fbPitch + dx];
+        if (!swrRowAnyOpaque(srcline, dw)) continue;
 
         int x = 0;
         for (; x + 8 <= dw; x += 8)
         {
             swrVec8 s, d;
             memcpy(&s, srcline + x, sizeof(s));
+            if (!swrVecAnyOpaque(s)) continue;
             memcpy(&d, dstline + x, sizeof(d));
 
             swrVec8 out = swrBlendVec(s, d, tintR, tintG, tintB, applyTint, additive, srcalpha, dstalpha);
