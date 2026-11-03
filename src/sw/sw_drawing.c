@@ -882,13 +882,41 @@ FORCE_INLINE void swrAccumulateCoverageRect(SWRenderer* swr, int x, int y, int w
     }
 }
 
+// True when any byte in a coverage rectangle is non-zero. The surface composite
+// only writes pixels whose coverage is set, so a rectangle that is completely
+// empty would be walked pixel by pixel to discover that - chapter 5 keeps a
+// castle-reflection surface alive in battle rooms where it is empty most frames.
+static bool swrCoverageAny(const uint8_t* plane, int stride, int x, int y, int w, int h)
+{
+    if (plane == nullptr || w <= 0 || h <= 0) return false;
+    for (int row = 0; row < h; row++)
+    {
+        const uint8_t* p = plane + (size_t) (y + row) * (size_t) stride + x;
+        int remaining = w;
+        while (remaining >= 8)
+        {
+            uint64_t word;
+            memcpy(&word, p, sizeof word);
+            if (word != 0) return true;
+            p += 8;
+            remaining -= 8;
+        }
+        while (remaining-- > 0)
+        {
+            if (*p != 0) return true;
+            p++;
+        }
+    }
+    return false;
+}
+
 // Blends a sprite rectangle whose source or destination carries coverage. Used only
 // when a surface is on either side of the draw, so the ordinary sprites keep their
 // fast paths.
 static void swrBlendSpriteCoverage(SWRenderer* swr, int dx, int dy, int dw, int dh,
                                    const SWTexture* texture, int sx, int sy,
                                    int32_t ixs2, int32_t oxs2, int32_t iys2, int32_t oys2,
-                                   int fp_prec, int iys, int oys,
+                                   int fp_prec, int iys, int oys, int sw, int sh,
                                    uintpixel_t tintColor, int alpha, bool unscaled)
 {
     const bool subtract = (swr->blendMode == bm_subtract);
@@ -896,6 +924,20 @@ static void swrBlendSpriteCoverage(SWRenderer* swr, int dx, int dy, int dw, int 
     const uint8_t* srcCoverage = texture->alphaPlane;
 
     swr->pxScalarBlend += (uint64_t) dw * (uint64_t) dh;
+
+    // Nothing was ever drawn into this part of the source surface, so every texel
+    // would be skipped below. Scanning the coverage bytes beats walking the
+    // destination. Only the source plane can be judged here: when it is absent the
+    // coverage comes from the target instead, and the draw still has to happen.
+    if (srcCoverage != nullptr &&
+        !swrCoverageAny(srcCoverage, (int) texture->width, sx, sy, sw, sh))
+        return;
+
+    // Constant for the whole draw. On the ARM target there is no hardware divider,
+    // so the per-pixel alpha scale becomes a table lookup.
+    const bool whiteTint = swrTintIsWhite(tintColor);
+    int coverageLut[256];
+    for (int i = 0; i < 256; i++) coverageLut[i] = (drawAlpha * i + 127) / 255;
 
     uint8_t* coveragePlane = swrTargetCoverage(swr);
 
@@ -934,11 +976,11 @@ static void swrBlendSpriteCoverage(SWRenderer* swr, int dx, int dy, int dw, int 
                     ? (int) srccoverageLine[sxi] : (opaque(pixel) ? 255 : 0);
                 if (texel == 0) continue;
 
-                const int coverage = (drawAlpha * texel + 127) / 255;
+                const int coverage = coverageLut[texel];
                 if (coverage == 0) continue;
 
                 swrBlendWithCoverage(&dstline[x], dstCoverageLine != nullptr ? &dstCoverageLine[x] : nullptr,
-                                     tint(tintColor, pixel), coverage, subtract);
+                                     (whiteTint ? pixel : tint(tintColor, pixel)), coverage, subtract);
                 continue;
             }
 
@@ -963,7 +1005,7 @@ static void swrBlendSpriteCoverage(SWRenderer* swr, int dx, int dy, int dw, int 
             const int texel = (c00 * w00 + c10 * w10 + c01 * w01 + c11 * w11) / wsum;
             if (texel == 0) continue;
 
-            const int coverage = (drawAlpha * texel + 127) / 255;
+            const int coverage = coverageLut[texel];
             if (coverage == 0) continue;
 
             // Weighted colour, ignoring transparent texels so their (undefined) colour
@@ -982,7 +1024,7 @@ static void swrBlendSpriteCoverage(SWRenderer* swr, int dx, int dy, int dw, int 
             }
 
             swrBlendWithCoverage(&dstline[x], dstCoverageLine != nullptr ? &dstCoverageLine[x] : nullptr,
-                                 tint(tintColor, mixed), coverage, subtract);
+                                 (whiteTint ? mixed : tint(tintColor, mixed)), coverage, subtract);
         }
     }
 }
@@ -1188,6 +1230,41 @@ static void swrDrawSpriteInternal(
         return;
     }
 
+    // A one-texel source carries no detail. Deltarune stretches 1x1 sprites across
+    // whole screens for its dark backdrops and fades (the battle ground is a 1x1
+    // black texel scaled to 660x500), and stepping a source coordinate per
+    // destination pixel just to read the same texel again costs an order of
+    // magnitude more than writing the resulting colour straight in.
+    if (UNLIKELY(sw == 1 && sh == 1))
+    {
+        const uintpixel_t texel = texture->buffer[(size_t) sy * texture->width + sx];
+        if (!opaque(texel)) return;
+
+        const uintpixel_t colour = swrTintIsWhite(tintColor) ? texel : tint(tintColor, texel);
+        swr->pxWritten += (uint64_t) dw * (uint64_t) dh;
+
+        if (srcalpha > 253 && invalpha < 3)
+        {
+            swr->pxFastCopy += (uint64_t) dw * (uint64_t) dh;
+            for (int y = 0; y < dh; y++)
+            {
+                uintpixel_t* dstline = &swr->fb[(size_t) (dy + y) * swr->fbPitch + dx];
+                for (int x = 0; x < dw; x++) dstline[x] = colour;
+            }
+        }
+        else
+        {
+            swr->pxScalarBlend += (uint64_t) dw * (uint64_t) dh;
+            for (int y = 0; y < dh; y++)
+            {
+                uintpixel_t* dstline = &swr->fb[(size_t) (dy + y) * swr->fbPitch + dx];
+                for (int x = 0; x < dw; x++)
+                    alphaBlend(&dstline[x], colour, srcalpha, invalpha);
+            }
+        }
+        return;
+    }
+
     const bool unscaled = (sw == dw && sh == dh && !flipX && !flipY);
     const bool plainCopy = swrTintIsWhite(tintColor) && srcalpha > 253 && invalpha < 3;
 
@@ -1198,7 +1275,7 @@ static void swrDrawSpriteInternal(
     {
         swr->pxWritten += (uint64_t) dw * (uint64_t) dh;
         swrBlendSpriteCoverage(swr, dx, dy, dw, dh, texture, sx, sy,
-                               ixs2, oxs2, iys2, oys2, fp_prec, iys, oys,
+                               ixs2, oxs2, iys2, oys2, fp_prec, iys, oys, sw, sh,
                                tintColor, alpha, unscaled);
         return;
     }
@@ -1254,6 +1331,10 @@ static void swrDrawSpriteInternal(
         {
             swr->pxScalarBlend += (uint64_t) dw * (uint64_t) dh;
 
+            // tint() re-tests for the identity colour on every pixel; that test is
+            // constant for the draw, so hoist it out of the loop.
+            const bool whiteTint = swrTintIsWhite(tintColor);
+
             for (int y = 0; y < dh; y++)
             {
                 const uintpixel_t* srcline = &texture->buffer[(sy + y) * texture->width + sx];
@@ -1263,7 +1344,8 @@ static void swrDrawSpriteInternal(
                 {
                     uintpixel_t pixel = srcline[x];
                     if (opaque(pixel))
-                        alphaBlend(&dstline[x], tint(tintColor, pixel), srcalpha, invalpha);
+                        alphaBlend(&dstline[x], whiteTint ? pixel : tint(tintColor, pixel),
+                                   srcalpha, invalpha);
                 }
             }
         }
@@ -1377,6 +1459,7 @@ static void swrDrawSpriteInternal(
 
         swr->pxScalarBlend += (uint64_t) dw * (uint64_t) dh;
 
+        const bool whiteTint = swrTintIsWhite(tintColor);
         fixedp_t ys2 = iys2;
         for (int y = 0, ys = iys; y < dh; y++, ys += oys, ys2 += oys2)
         {
@@ -1393,7 +1476,8 @@ static void swrDrawSpriteInternal(
             {
                 uintpixel_t pixel = srcline[(int)(xs2 >> fp_prec)];
                 if (opaque(pixel))
-                    alphaBlend(&dstline[x], tint(tintColor, pixel), srcalpha, invalpha);
+                    alphaBlend(&dstline[x], whiteTint ? pixel : tint(tintColor, pixel),
+                               srcalpha, invalpha);
             }
         }
     }
@@ -1480,24 +1564,46 @@ static void swrDrawSpriteRotatedInternal(
     const bool extState = (swr->pixelMode != SWR_PIXEL_LEGACY);
     const uint16_t extMaskBits = swrWriteMaskBits(swr->writeMask);
     const int extAlpha = alpha < 0 ? 0 : (alpha > 256 ? 256 : alpha);
-    const bool extTint = !swrTintIsWhite(tintColor);
-    
+    const bool whiteTint = swrTintIsWhite(tintColor);
+    const bool extTint = !whiteTint;
+
+    // Unrotated sprites still come through here - every flipped draw does, and so does
+    // anything drawn with draw_sprite_ext at angle 0 - and at that angle the inverse
+    // transform is a plain translation: cosf(0) is exactly 1.0f and sinf(0) exactly
+    // 0.0f, so the general form below reduces to these expressions with no change in
+    // rounding. Dropping two float multiplies and two adds per pixel takes about a
+    // third off this loop, which is where flipped sprites are rasterised.
+    const bool axisAligned = (cosA == 1.0f) && (sinA == 0.0f);
+    const float lxBase = pxa - dx;
+    const float lyBase = pya - dy;
+
     for (int cy = minYc; cy < maxYc; cy++)
     {
         uintpixel_t *dstline = &swr->fb[cy * swr->fbPitch];
+        const float rowOy = (float) cy + 0.5f - pya;
         for (int cx = minXc; cx < maxXc; cx++)
         {
             // we need to determine the texture-space coordinate of cx/cy
             float ox = (float) cx + 0.5f - pxa;
-            float oy = (float) cy + 0.5f - pya;
-            
-            // "undo" the rotation
-            float lx =  cosA * ox + sinA * oy;
-            float ly = -sinA * ox + cosA * oy;
-            
-            // turn it into a texture-local coordinate
-            lx += pxa - dx;
-            ly += pya - dy;
+            float lx, ly;
+
+            if (axisAligned)
+            {
+                lx = ox + lxBase;
+                ly = rowOy + lyBase;
+            }
+            else
+            {
+                float oy = rowOy;
+
+                // "undo" the rotation
+                lx =  cosA * ox + sinA * oy;
+                ly = -sinA * ox + cosA * oy;
+
+                // turn it into a texture-local coordinate
+                lx += lxBase;
+                ly += lyBase;
+            }
             
             if (lx < 0 || ly < 0 || lx >= (float) dw || ly >= (float) dh) continue;
             
@@ -1524,7 +1630,7 @@ static void swrDrawSpriteRotatedInternal(
                                    extAlpha, extMaskBits);
             }
             else if (opaque(src))
-                alphaBlend(&dstline[cx], tint(tintColor, src), srcalpha, invalpha);
+                alphaBlend(&dstline[cx], whiteTint ? src : tint(tintColor, src), srcalpha, invalpha);
         }
     }
 }
