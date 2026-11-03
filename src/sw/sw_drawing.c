@@ -1158,6 +1158,16 @@ static void swrDrawSpriteInternal(
         const int extAlpha = alpha < 0 ? 0 : (alpha > 256 ? 256 : alpha);
         const bool extTint = !swrTintIsWhite(tintColor);
 
+        // A surface pass also has to build the coverage plane its composite reads
+        // back. Pizza Tower renders every frame through the extended blend unit, so
+        // without this its application surface reads back empty and the screen stays
+        // black. The mask pass (SWR_PIXEL_SELECT) writes the stencil, not the image,
+        // so it deliberately contributes nothing here.
+        uint8_t* coveragePlane = swrTargetCoverage(swr);
+        const bool feedsCoverage = coveragePlane != nullptr &&
+                                   swr->pixelMode != SWR_PIXEL_SELECT &&
+                                   (maskBits & SWR_COLOR_BITS) != 0;
+
         swr->pxWritten += (uint64_t) dw * (uint64_t) dh;
         swr->pxScalarBlend += (uint64_t) dw * (uint64_t) dh;
 
@@ -1165,6 +1175,8 @@ static void swrDrawSpriteInternal(
         for (int y = 0, ys = iys; y < dh; y++, ys += oys, ys2 += oys2)
         {
             uintpixel_t* dstline = &swr->fb[(dy + y) * swr->fbPitch + dx];
+            uint8_t* dstCoverageLine = feedsCoverage
+                ? &coveragePlane[(size_t) (dy + y) * swr->fbPitch + dx] : nullptr;
             const uintpixel_t* srcline;
             if (dh == sh)
                 srcline = &texture->buffer[(sy + ys) * texture->width + sx];
@@ -1178,6 +1190,8 @@ static void swrDrawSpriteInternal(
                 if (!opaque(pixel)) continue;
                 swrBlitPixelEx(swr, &dstline[x], extTint ? tint(tintColor, pixel) : pixel,
                                extAlpha, maskBits);
+                if (dstCoverageLine != nullptr)
+                    swrAccumulateCoverage(&dstCoverageLine[x], extAlpha);
             }
         }
         return;
@@ -1207,10 +1221,16 @@ static void swrDrawSpriteInternal(
         swr->pxWritten += (uint64_t) dw * (uint64_t) dh;
         swr->pxScalarBlend += (uint64_t) dw * (uint64_t) dh;
 
+        // Same reason as the extended-blend loop above: a shader pass that writes into
+        // a surface has to leave coverage behind, or the composite drops it.
+        uint8_t* shaderCoveragePlane = swrTargetCoverage(swr);
+
         fixedp_t ys2 = iys2;
         for (int y = 0, ys = iys; y < dh; y++, ys += oys, ys2 += oys2)
         {
             uintpixel_t* dstline = &swr->fb[(dy + y) * swr->fbPitch + dx];
+            uint8_t* dstCoverageLine = (shaderCoveragePlane != nullptr)
+                ? &shaderCoveragePlane[(size_t) (dy + y) * swr->fbPitch + dx] : nullptr;
             const uintpixel_t* srcline;
             if (dh == sh)
                 srcline = &texture->buffer[(sy + ys) * texture->width + sx];
@@ -1225,6 +1245,8 @@ static void swrDrawSpriteInternal(
                 swrShaderEmuPixel(&shaderCtx, dx + x, dy + y, &shaded);
                 alphaBlend(&dstline[x], shadedTint ? tint(tintColor, shaded) : shaded,
                            srcalpha, invalpha);
+                if (dstCoverageLine != nullptr)
+                    swrAccumulateCoverage(&dstCoverageLine[x], srcalpha);
             }
         }
         return;

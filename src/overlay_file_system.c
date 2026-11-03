@@ -149,9 +149,18 @@ static char* overlayReadFileText(FileSystem* fs, const char* relativePath) {
     free(fullPath);
     if (f == nullptr) return nullptr;
 
-    fseek(f, 0, SEEK_END);
-    long size = ftell(f);
-    fseek(f, 0, SEEK_SET);
+    // Ask the file itself how big it is: ftell() on whatever fopen() accepted is not
+    // enough, because fopen() opens a directory in read mode and then reports a
+    // saturating size. Pizza Tower reads its save directory as a text file (an empty
+    // name resolves to the folder), which used to reach safeMalloc() with 2^63 bytes
+    // and abort the process.
+    struct stat st;
+    if (fstat(fileno(f), &st) != 0 || !S_ISREG(st.st_mode) || st.st_size < 0) {
+        fclose(f);
+        return nullptr;
+    }
+
+    const long size = (long) st.st_size;
 
     char* content = (char *)safeMalloc((size_t) size + 1);
     size_t bytesRead = fread(content, 1, (size_t) size, f);
