@@ -299,6 +299,41 @@ void SWRenderer_setDrawTrace(Renderer* renderer, bool enabled)
     ((SWRenderer*) renderer)->traceDraws = enabled ? 1 : 0;
 }
 
+// Writes one surface to a PNG, with the 1-bit transparent flag turned into a real
+// alpha channel so an empty pixel is distinguishable from a black one. Debug aid:
+// surfaces are where the game builds its masks, and a mask that is white where it
+// should be black looks identical to "the blend is wrong" until you see the mask.
+static bool swrDumpSurface(SWRenderer* swr, int index, const char* path)
+{
+    if (index < 0 || (size_t) index >= swr->surfaceCount) return false;
+    SWSurface* surface = swr->surfaces[index];
+    if (surface == nullptr || surface->texture == nullptr || surface->texture->buffer == nullptr)
+        return false;
+
+    const int32_t w = (int32_t) surface->texture->width;
+    const int32_t h = (int32_t) surface->texture->height;
+    uint8_t* rgba = (uint8_t*) safeMalloc((size_t) w * (size_t) h * 4);
+    if (rgba == nullptr) return false;
+
+    for (int32_t y = 0; y < h; y++)
+    {
+        const uintpixel_t* row = &surface->texture->buffer[(size_t) y * (size_t) w];
+        uint8_t* out = rgba + (size_t) y * (size_t) w * 4;
+        for (int32_t x = 0; x < w; x++)
+        {
+            const uintpixel_t px = row[x];
+            out[x * 4 + 0] = (uint8_t) (((px >> 10) & 0x1F) * 255 / 31);
+            out[x * 4 + 1] = (uint8_t) (((px >> 5) & 0x1F) * 255 / 31);
+            out[x * 4 + 2] = (uint8_t) ((px & 0x1F) * 255 / 31);
+            out[x * 4 + 3] = (px & SWR_ALPHA_BIT) ? 255 : 0;
+        }
+    }
+
+    const int ok = stbi_write_png(path, w, h, 4, rgba, w * 4);
+    free(rgba);
+    return ok != 0;
+}
+
 bool SWRenderer_captureFramebuffer(Renderer* renderer, const char* path)
 {
     if (renderer == nullptr || path == nullptr) return false;
@@ -326,6 +361,23 @@ bool SWRenderer_captureFramebuffer(Renderer* renderer, const char* path)
 
     int ok = stbi_write_png(path, w, h, 4, rgba, w * 4);
     free(rgba);
+
+    {
+        const char* dump = getenv("BUTTERSCOTCH_DUMP_SURFACES");
+        if (dump != nullptr && dump[0] != '\0' && dump[0] != '0')
+        {
+            for (int i = 0; i < (int) swr->surfaceCount; i++)
+            {
+                char surfacePath[512];
+                snprintf(surfacePath, sizeof(surfacePath), "swsurf_%d.png", i);
+                if (swrDumpSurface(swr, i, surfacePath))
+                    logInfo("Surface dump: %s (%dx%d)\n", surfacePath,
+                            (int) swr->surfaces[i]->texture->width,
+                            (int) swr->surfaces[i]->texture->height);
+            }
+        }
+    }
+
     return ok != 0;
 }
 
