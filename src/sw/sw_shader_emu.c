@@ -62,6 +62,19 @@ static bool swrUniformVec(const SWRenderer* swr, const char* name, float* out, i
     return false;
 }
 
+// shd_alpha: gl_FragColor.a = min(gl_FragColor.a, alpha). The game animates the
+// `alpha` uniform from a layer begin script, so the whole layer fades together.
+bool swrShaderEmuAlphaClampBegin(SWRenderer* swr, int* outAlpha)
+{
+    if (!swrShaderNameIs(swr, "shd_alpha")) return false;
+
+    float a = swrUniform(swr, "alpha", 1.0f);
+    if (!(a > 0.0f)) a = 0.0f;   // also catches NaN
+    if (a > 1.0f) a = 1.0f;
+    *outAlpha = (int) (a * 256.0f + 0.5f);
+    return true;
+}
+
 // ===[ shd_shadowblend / shd_forcecolour ]===
 //
 //   gl_FragColor = v_vColour * texture2D(gm_BaseTexture, v_vTexcoord);

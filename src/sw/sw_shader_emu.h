@@ -110,6 +110,23 @@ SWRFlatShaderCtx;
 // neither of the two, or the game has not set its colour uniform yet.
 bool swrShaderEmuFlatBegin(SWRenderer* swr, SWRFlatShaderCtx* ctx);
 
+// ===[ shd_alpha ]===
+//
+//   gl_FragColor = v_vColour * texture2D(gm_BaseTexture, v_vTexcoord);
+//   gl_FragColor.a = min(gl_FragColor.a, alpha);
+//
+// The game binds this to a whole layer and animates the `alpha` uniform from a
+// layer begin script, so the layer fades as one unit. Chapter 5 uses it on the
+// TILES_Newpath layer of the pink room: that layer is the walkable path overlay
+// (the room controller reads it as self.path_layer and the game keeps its
+// collision data in it), and the script drives its alpha down so the overlay is
+// not drawn over the wall. Without the clamp the path tiles paint bright floor
+// tiles straight through the wallpaper.
+//
+// Returns true and writes the clamped alpha (0..256, the range this renderer
+// blends in) when the bound shader is shd_alpha.
+bool swrShaderEmuAlphaClampBegin(SWRenderer* swr, int* outAlpha);
+
 // Fragment result for one texel: `maskAlpha` is the silhouette coverage (0..255)
 // and `drawAlpha` the draw call's alpha scaled to 0..256, which is the range this
 // renderer blends in. Writes RGB555 (alpha bit clear) and the final alpha.

@@ -587,6 +587,20 @@ static bool swrDestIsOffscreen(SWRenderer* swr, float dx, float dy, float dw, fl
 
     return offscreen;
 }
+
+// shd_alpha: gl_FragColor.a = min(gl_FragColor.a, alpha). Chapter 5 binds it to a
+// whole layer and animates the `alpha` uniform from a layer begin script, so the
+// layer fades as one unit. Applying the clamp to the draw alpha is equivalent for
+// the opaque texels those layers are made of, and it covers every blit path at
+// once.
+static float swrClampAlphaForShader(SWRenderer* swr, float alpha)
+{
+    int shaderAlpha;
+    if (!swrShaderEmuAlphaClampBegin(swr, &shaderAlpha)) return alpha;
+    float clamped = (float) shaderAlpha / 256.0f;
+    return clamped < alpha ? clamped : alpha;
+}
+
 static void swrDrawSpriteEntry(Renderer* renderer, int32_t tpagIndex, float x, float y,
                                   float originX, float originY, float xscale, float yscale,
                                   float angleDeg, uint32_t color, float alpha)
@@ -653,11 +667,13 @@ static void swrDrawSpriteEntry(Renderer* renderer, int32_t tpagIndex, float x, f
         if (tpag->targetHeight != tpag->sourceHeight)
             pivotY *= (float)tpag->targetHeight/ tpag->sourceHeight;
         
-        swrDrawSpriteRotated(renderer, dx, dy, dw, dh, texture, sx, sy, sw, sh, color, alpha, angleDeg, pivotX, pivotY);
+        swrDrawSpriteRotated(renderer, dx, dy, dw, dh, texture, sx, sy, sw, sh, color,
+                             swrClampAlphaForShader(swr, alpha), angleDeg, pivotX, pivotY);
     }
     else
     {
-        swrDrawSprite(renderer, dx, dy, dw, dh, texture, sx, sy, sw, sh, color, alpha);
+        swrDrawSprite(renderer, dx, dy, dw, dh, texture, sx, sy, sw, sh, color,
+                      swrClampAlphaForShader(swr, alpha));
     }
 }
 
@@ -712,11 +728,13 @@ static void swrDrawSpritePartEntry(Renderer* renderer, int32_t tpagIndex,
 
     if (UNLIKELY(swrMustRotate(angleDeg)))
     {
-        swrDrawSpriteRotated(renderer, dx, dy, dw, dh, texture, sx, sy, sw, sh, color, alpha, angleDeg, pivotX * dw, pivotY * dh);
+        swrDrawSpriteRotated(renderer, dx, dy, dw, dh, texture, sx, sy, sw, sh, color,
+                             swrClampAlphaForShader(swr, alpha), angleDeg, pivotX * dw, pivotY * dh);
     }
     else
     {
-        swrDrawSprite(renderer, dx, dy, dw, dh, texture, sx, sy, sw, sh, color, alpha);
+        swrDrawSprite(renderer, dx, dy, dw, dh, texture, sx, sy, sw, sh, color,
+                      swrClampAlphaForShader(swr, alpha));
     }
 }
 
@@ -1819,6 +1837,11 @@ static bool SWRenderer_shadersSupported(void)
 static void SWRenderer_gpuSetShader(Renderer* renderer, int32_t shaderIndex)
 {
     SWRenderer* swr = (SWRenderer*) renderer;
+    // The base field is what shader_get() reports and what Runner_pushLayerShader /
+    // Runner_popLayerShader save and restore around a layer. Leaving it stale made a
+    // layer shader stay bound after its layer was drawn, which turned every later
+    // draw into a shd_alpha draw with that layer's uniform.
+    renderer->currentShader = shaderIndex;
     if (swr->shaderIndex == shaderIndex) return;
     swr->shaderIndex = shaderIndex;
     // Stages belong to the program that was bound when they were set, so a new
@@ -1830,6 +1853,7 @@ static void SWRenderer_gpuResetShader(Renderer* renderer)
 {
     SWRenderer* swr = (SWRenderer*) renderer;
     swr->shaderIndex = -1;
+    renderer->currentShader = -1;
 }
 
 // A uniform handle is a hash of the uniform's name rather than a slot index. The

@@ -693,7 +693,7 @@ static int32_t Runner_pushLayerShader(Runner* runner, int32_t layerId) {
 
 static void Runner_popLayerShader(Runner* runner, int32_t previousShader) {
     Renderer* renderer = runner->renderer;
-    if (renderer == nullptr || previousShader == -1) return;
+    if (renderer == nullptr) return;
     if (renderer->currentShader == previousShader) return;
 
     renderer->vtable->gpuSetShader(renderer, previousShader);
