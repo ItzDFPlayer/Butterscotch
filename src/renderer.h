@@ -464,12 +464,19 @@ static inline void Renderer_drawSpriteGeneral(Renderer* renderer, int32_t sprite
     if (height > tpag->sourceHeight - top) height = tpag->sourceHeight - top;
     if (0 >= width || 0 >= height) return;
 
+    // The rotation pivot is a fraction of the drawn box, and draw_sprite_general has
+    // no pivot argument: GameMaker spins the part about the point it is anchored at,
+    // which is the top-left of the region this draw places at (x, y). Passing x and y
+    // themselves made every rotated draw_sprite_general spin about a point thousands
+    // of pixels away and land nowhere - Deltarune draws the climb jump corridor with
+    // it, rotated 180 degrees when the jump points up, so the corridor simply vanished
+    // while the unrotated one (jumping down) was fine.
     if (color1 == color2 && color2 == color3 && color3 == color4) {
-        renderer->vtable->drawSpritePart(renderer, tpagIndex, left, top, width, height, x, y, xscale, yscale, angleDeg, x, y, color1, alpha);
+        renderer->vtable->drawSpritePart(renderer, tpagIndex, left, top, width, height, x, y, xscale, yscale, angleDeg, 0.0f, 0.0f, color1, alpha);
         return;
     }
 
-    renderer->vtable->drawSpritePartColor(renderer, tpagIndex, left, top, width, height, x, y, xscale, yscale, angleDeg, x, y, color1, color2, color3, color4, alpha);
+    renderer->vtable->drawSpritePartColor(renderer, tpagIndex, left, top, width, height, x, y, xscale, yscale, angleDeg, 0.0f, 0.0f, color1, color2, color3, color4, alpha);
 }
 
 static inline void Renderer_drawVertex(Renderer* renderer, float x, float y, float z, uint32_t color, float alpha, float u, float v) {

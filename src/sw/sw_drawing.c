@@ -1812,8 +1812,15 @@ void swrDrawLine(Renderer* renderer, float x1, float y1, float x2, float y2, flo
     swrDrawLineInt(renderer, swrFloor(x1), swrFloor(y1), swrCeiling(x2), swrCeiling(y2), swrCeiling(width), color, color2, swrIntAlpha(alpha));
 }
 
+// draw_rectangle() takes two opposite corners in any order, and GameMaker draws the
+// outline whichever way round they are. The line clipper drops a negative extent, so
+// the extent has to be made positive here, or a rectangle handed over bottom-right
+// first draws only the two sides that happen to run left-to-right/top-to-bottom.
 void swrDrawRectangle(Renderer* renderer, float x1, float y1, float x2, float y2, uintpixel_t color, float alpha)
 {
+    if (x2 < x1) { const float tmp = x1; x1 = x2; x2 = tmp; }
+    if (y2 < y1) { const float tmp = y1; y1 = y2; y2 = tmp; }
+
     swrDrawHLine(renderer, x1, y1, (x2 - x1) + 1, color, color, alpha);
     swrDrawHLine(renderer, x1, y2, (x2 - x1) + 1, color, color, alpha);
     swrDrawVLine(renderer, x1, y1, (y2 - y1) + 1, color, color, alpha);
@@ -1822,6 +1829,20 @@ void swrDrawRectangle(Renderer* renderer, float x1, float y1, float x2, float y2
 
 void swrDrawRectangleColor(Renderer* renderer, float x1, float y1, float x2, float y2, uintpixel_t color1, uintpixel_t color2, uintpixel_t color3, uintpixel_t color4, float alpha)
 {
+    // Corners are c1=(x1,y1), c2=(x2,y1), c3=(x1,y2), c4=(x2,y2); swapping a pair of
+    // coordinates has to swap the two colours on that axis with it so the gradient
+    // still runs from the same corner colours.
+    if (x2 < x1) {
+        const float tmp = x1; x1 = x2; x2 = tmp;
+        const uintpixel_t tmpc = color1; color1 = color2; color2 = tmpc;
+        const uintpixel_t tmpc2 = color3; color3 = color4; color4 = tmpc2;
+    }
+    if (y2 < y1) {
+        const float tmp = y1; y1 = y2; y2 = tmp;
+        const uintpixel_t tmpc = color1; color1 = color3; color3 = tmpc;
+        const uintpixel_t tmpc2 = color2; color2 = color4; color4 = tmpc2;
+    }
+
     swrDrawHLine(renderer, x1, y1, (x2 - x1) + 1, color1, color2, alpha);
     swrDrawHLine(renderer, x1, y2, (x2 - x1) + 1, color3, color4, alpha);
     swrDrawVLine(renderer, x1, y1, (y2 - y1) + 1, color1, color3, alpha);
