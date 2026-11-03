@@ -33,6 +33,7 @@ SWTexture* swrCreateTextureEx(const void* srcBuffer, int width, int height, bool
     txt->stripsLoaded = 0;
     txt->stripRows = 0;
     txt->stripCount = 0;
+    txt->alphaPlane = NULL;
     
     return txt;
 }
@@ -58,6 +59,7 @@ SWTexture* swrAdoptTexture(uintpixel_t* buffer, int width, int height)
     txt->stripsLoaded = 0;
     txt->stripRows = 0;
     txt->stripCount = 0;
+    txt->alphaPlane = NULL;
     return txt;
 }
 
@@ -81,6 +83,9 @@ SWTexture* swrCreateSparseTexture(int width, int height, int stripRows, int stri
     txt->stripsLoaded = 0;
     txt->stripRows = (uint16_t) stripRows;
     txt->stripCount = (uint16_t) stripCount;
+    // Texture pages have no coverage plane; leaving this uninitialised handed the
+    // blit a garbage pointer to blend against.
+    txt->alphaPlane = NULL;
     return txt;
 }
 

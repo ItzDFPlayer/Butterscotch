@@ -811,6 +811,87 @@ static void swrBlendSpriteVector(SWRenderer* swr, int dx, int dy, int dw, int dh
 }
 #endif
 
+// ====[ Surface coverage ]====
+//
+// Surfaces are RGBA upstream and the Chapter 4/5 shadow systems blend against their
+// alpha channel: a mask surface is cleared to alpha 0, silhouettes are painted into
+// it, a dithered band is subtracted back out, and the result is composited over the
+// scene so only the covered pixels get darkened. Five bits of colour and one
+// transparent bit cannot carry that, so surfaces own a byte per pixel of coverage and
+// every draw that reads one or writes one goes through here.
+//
+// `coverage` is the effective source alpha in 0..256, i.e. the draw alpha already
+// multiplied by the source pixel's own coverage.
+FORCE_INLINE void swrBlendWithCoverage(uintpixel_t* dst, uint8_t* dstCoverage,
+                                       uintpixel_t color, int coverage, bool subtract)
+{
+    if (!subtract)
+    {
+        alphaBlend(dst, color, coverage, 256 - coverage);
+        if (dstCoverage != nullptr)
+        {
+            // Same factors the colour used: (src_alpha, one_minus_src_alpha).
+            const int out = (coverage * coverage) / 256 +
+                            ((int) *dstCoverage * (256 - coverage)) / 256;
+            *dstCoverage = (uint8_t) (out > 255 ? 255 : out);
+        }
+        return;
+    }
+
+    alphaBlend(dst, color, -coverage, 256);
+    if (dstCoverage != nullptr)
+    {
+        const int out = (int) *dstCoverage - coverage;
+        *dstCoverage = (uint8_t) (out < 0 ? 0 : out);
+    }
+}
+
+// Blends a sprite rectangle whose source or destination carries coverage. Used only
+// when a surface is on either side of the draw, so the ordinary sprites keep their
+// fast paths.
+static void swrBlendSpriteCoverage(SWRenderer* swr, int dx, int dy, int dw, int dh,
+                                   const SWTexture* texture, int sx, int sy,
+                                   int32_t ixs2, int32_t oxs2, int32_t iys2, int32_t oys2,
+                                   int fp_prec, int iys, int oys,
+                                   uintpixel_t tintColor, int alpha, bool unscaled)
+{
+    const bool subtract = (swr->blendMode == bm_subtract);
+    const int drawAlpha = alpha < 0 ? 0 : (alpha > 256 ? 256 : alpha);
+    const uint8_t* srcCoverage = texture->alphaPlane;
+
+    swr->pxScalarBlend += (uint64_t) dw * (uint64_t) dh;
+
+    uint8_t* coveragePlane = swrTargetCoverage(swr);
+
+    int32_t ys2 = iys2;
+    for (int y = 0, ys = iys; y < dh; y++, ys += oys, ys2 += oys2)
+    {
+        const int srcRow = unscaled ? (sy + ys) : (sy + (int) (ys2 >> fp_prec));
+        uintpixel_t* dstline = &swr->fb[(size_t) (dy + y) * swr->fbPitch + dx];
+        uint8_t* dstCoverageLine = (coveragePlane != nullptr)
+            ? &coveragePlane[(size_t) (dy + y) * swr->fbPitch + dx] : nullptr;
+        const uintpixel_t* srcline = &texture->buffer[(size_t) srcRow * texture->width + sx];
+        const uint8_t* srccoverageLine = (srcCoverage != nullptr)
+            ? &srcCoverage[(size_t) srcRow * texture->width + sx] : nullptr;
+
+        int32_t xs2 = ixs2;
+        for (int x = 0; x < dw; x++, xs2 += oxs2)
+        {
+            const int sxi = (int) (xs2 >> fp_prec);
+            const uintpixel_t pixel = srcline[sxi];
+            const int texel = (srccoverageLine != nullptr)
+                ? (int) srccoverageLine[sxi] : (opaque(pixel) ? 255 : 0);
+            if (texel == 0) continue;
+
+            const int coverage = (drawAlpha * texel + 127) / 255;
+            if (coverage == 0) continue;
+
+            swrBlendWithCoverage(&dstline[x], dstCoverageLine != nullptr ? &dstCoverageLine[x] : nullptr,
+                                 tint(tintColor, pixel), coverage, subtract);
+        }
+    }
+}
+
 static void swrDrawSpriteInternal(
     Renderer* renderer, int dx, int dy, int dw, int dh,
     SWTexture* texture, int sx, int sy, int sw, int sh,
@@ -954,6 +1035,18 @@ static void swrDrawSpriteInternal(
 
     const bool unscaled = (sw == dw && sh == dh && !flipX && !flipY);
     const bool plainCopy = swrTintIsWhite(tintColor) && srcalpha > 253 && invalpha < 3;
+
+    // A surface on either side means this draw is part of a mask pass; both the
+    // per-pixel source coverage and the destination's own plane have to be honoured,
+    // which none of the fast paths below can do.
+    if (UNLIKELY(texture->alphaPlane != nullptr) || UNLIKELY(swrTargetCoverage(swr) != nullptr))
+    {
+        swr->pxWritten += (uint64_t) dw * (uint64_t) dh;
+        swrBlendSpriteCoverage(swr, dx, dy, dw, dh, texture, sx, sy,
+                               ixs2, oxs2, iys2, oys2, fp_prec, iys, oys,
+                               tintColor, alpha, unscaled);
+        return;
+    }
 
 #if PIXEL_SIZE == 16 && defined(__GNUC__)
     // Rasterise the whole sprite with the vector kernel when the blend maths allows

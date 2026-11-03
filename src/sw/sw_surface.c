@@ -6,6 +6,8 @@ SWSurface* swrCreateSurface(int width, int height)
     SWSurface* surf = (SWSurface*) safeMalloc(sizeof(SWSurface));
     surf->texture = swrCreateTexture(NULL, width, height);
     surf->shadowTexture = NULL;
+    // Surfaces start transparent, which is what a fresh surface is upstream.
+    surf->texture->alphaPlane = (uint8_t*) safeCalloc((size_t) width * (size_t) height, 1);
     return surf;
 }
 
@@ -14,6 +16,16 @@ void swrFreeSurface(SWSurface* surface)
     if (UNLIKELY(!surface))
         return;
     
+    if (surface->texture != NULL)
+    {
+        free(surface->texture->alphaPlane);
+        surface->texture->alphaPlane = NULL;
+    }
+    if (surface->shadowTexture != NULL)
+    {
+        free(surface->shadowTexture->alphaPlane);
+        surface->shadowTexture->alphaPlane = NULL;
+    }
     swrFreeTexture(surface->texture);
     swrFreeTexture(surface->shadowTexture);
     free(surface);

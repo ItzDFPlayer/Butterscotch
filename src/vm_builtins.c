@@ -11856,7 +11856,11 @@ static RValue builtin_draw_sprite_tiled(VMContext* ctx, RValue* args, MAYBE_UNUS
 
     float roomW = (float) runner->currentRoom->width;
     float roomH = (float) runner->currentRoom->height;
-    Renderer_drawSpriteTiled(runner->renderer, spriteIndex, subimg, x, y, 1.0f, 1.0f, roomW, roomH, 0xFFFFFF, runner->renderer->drawAlpha);
+    // draw_sprite_tiled() honours the colour set by draw_set_colour(), exactly like
+    // draw_sprite() and draw_sprite_stretched(). Passing white here is why
+    // Deltarune's shoji-style shadow casters came out paper white instead of black.
+    Renderer_drawSpriteTiled(runner->renderer, spriteIndex, subimg, x, y, 1.0f, 1.0f, roomW, roomH,
+                             runner->renderer->drawColor, runner->renderer->drawAlpha);
     return RValue_makeUndefined();
 }
 
@@ -11898,7 +11902,9 @@ static RValue builtin_draw_sprite_stretched(VMContext* ctx, RValue* args, MAYBE_
         subimg = (int32_t) ctx->currentCallFrame->self->imageIndex;
     }
 
-    Renderer_drawSpriteStretched(runner->renderer, spriteIndex, subimg, x, y, w, h, 0xFFFFFF, runner->renderer->drawAlpha);
+    // Same: the stretched variant is tinted by the current draw colour.
+    Renderer_drawSpriteStretched(runner->renderer, spriteIndex, subimg, x, y, w, h,
+                                 runner->renderer->drawColor, runner->renderer->drawAlpha);
     return RValue_makeUndefined();
 }
 

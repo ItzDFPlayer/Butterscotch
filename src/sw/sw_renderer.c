@@ -325,7 +325,11 @@ static bool swrDumpSurface(SWRenderer* swr, int index, const char* path)
             out[x * 4 + 0] = (uint8_t) (((px >> 10) & 0x1F) * 255 / 31);
             out[x * 4 + 1] = (uint8_t) (((px >> 5) & 0x1F) * 255 / 31);
             out[x * 4 + 2] = (uint8_t) ((px & 0x1F) * 255 / 31);
-            out[x * 4 + 3] = (px & SWR_ALPHA_BIT) ? 255 : 0;
+            // Surfaces carry real coverage; fall back to the transparent bit for
+            // anything that does not.
+            out[x * 4 + 3] = (surface->texture->alphaPlane != NULL)
+                ? surface->texture->alphaPlane[(size_t) y * (size_t) w + x]
+                : ((px & SWR_ALPHA_BIT) ? 255 : 0);
         }
     }
 
@@ -1083,8 +1087,17 @@ static void SWRenderer_clearScreen(Renderer* renderer, uint32_t color, float alp
         logInfo("Surf clear    target=%d color=%06X alpha=%.3f -> %04X\n",
                 swr->currentSurfaceIndex, (unsigned) (color & 0xFFFFFF), alpha, (unsigned) color);
     
+    // The colour carries a one-bit transparency flag; a surface's alpha plane is
+    // the real coverage the game blends against, so it has to follow the clear.
+    uint8_t coverage = 255;
+    if (alpha < 0.002f) coverage = 0;
+    else if (alpha < 0.998f) coverage = (uint8_t) (alpha * 255.0f + 0.5f);
+
     for (int y = 0; y < swr->height; y++) {
         uintpixel_t* line = &swr->fb[y * swr->fbPitch];
+        uint8_t* coverageLine = swrTargetCoverage(swr);
+        if (coverageLine != NULL)
+            memset(&coverageLine[y * swr->fbPitch], coverage, (size_t) swr->width);
         for (int x = 0; x < swr->width; x++) {
             line[x] = color;
         }
@@ -1194,7 +1207,8 @@ static void SWRenderer_gpuSetColorWriteEnable(Renderer* renderer, bool red, bool
     // no need to change other properties, because the width and height are the same.
     // but we ALWAYS need to re-fetch the writable surface texture since the old one
     // may have been freed.
-    swr->fb = swrWritableSurfaceTexture(swr, swr->currentSurfaceIndex)->buffer;
+    SWTexture* writable = swrWritableSurfaceTexture(swr, swr->currentSurfaceIndex);
+    swr->fb = writable->buffer;
     
     if (currSurf->shadowTexture) {
         assert(currSurf->texture->width == currSurf->shadowTexture->width);
@@ -1299,6 +1313,9 @@ static void SWRenderer_drawSurface(Renderer* renderer, int32_t surfaceID,
         localSurface.buffer = swrIsOnSurface(swr) ? swr->mainFb : swr->fb;
         localSurface.width = swrIsOnSurface(swr) ? swr->mainWidth : swr->width;
         localSurface.height = swrIsOnSurface(swr) ? swr->mainHeight : swr->height;
+        // The screen has no coverage plane; leaving this unset would hand the blit a
+        // stack-garbage pointer to blend against.
+        localSurface.alphaPlane = NULL;
         surface = &localSurface;
     } else {
         if (surfaceID < 0 || (size_t) surfaceID >= swr->surfaceCount || swr->surfaces[surfaceID] == NULL) {
@@ -1411,6 +1428,7 @@ static void SWRenderer_surfaceCopy(Renderer* renderer,
         temp1.width = swr->mainWidth;
         temp1.height = swr->mainHeight;
         temp1.buffer = swr->mainFb;
+        temp1.alphaPlane = NULL;
     }
     else if (DestSurfaceID < 0 || (size_t) DestSurfaceID >= swr->surfaceCount || swr->surfaces[DestSurfaceID] == NULL) {
         fprintf(stderr, "swr: Cannot resize surface id %d, it's invalid (dest in surfaceCopy)\n", DestSurfaceID);
@@ -1425,6 +1443,7 @@ static void SWRenderer_surfaceCopy(Renderer* renderer,
         temp2.width = swr->mainWidth;
         temp2.height = swr->mainHeight;
         temp2.buffer = swr->mainFb;
+        temp2.alphaPlane = NULL;
     }
     else if (SrcSurfaceID < 0 || (size_t) SrcSurfaceID >= swr->surfaceCount || swr->surfaces[SrcSurfaceID] == NULL) {
         fprintf(stderr, "swr: Cannot resize surface id %d, it's invalid (src in surfaceCopy)\n", SrcSurfaceID);
@@ -1469,6 +1488,14 @@ static void SWRenderer_surfaceCopy(Renderer* renderer,
         const uintpixel_t* srcLine = &srcSurf->buffer[(dy + SrcY)  * srcSurf->width];
         for (int dx = 0; dx < SrcW; dx++) {
             dstLine[dx + DestX] = srcLine[dx + SrcX];
+        }
+        if (dstSurf->alphaPlane != NULL)
+        {
+            uint8_t* dstAlpha = &dstSurf->alphaPlane[(dy + DestY) * dstSurf->width + DestX];
+            if (srcSurf->alphaPlane != NULL)
+                memcpy(dstAlpha, &srcSurf->alphaPlane[(dy + SrcY) * srcSurf->width + SrcX], (size_t) SrcW);
+            else
+                memset(dstAlpha, 255, (size_t) SrcW);
         }
     }
     

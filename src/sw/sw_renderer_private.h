@@ -46,6 +46,11 @@ typedef struct
     uint32_t stripsLoaded;
     uint16_t stripRows;
     uint16_t stripCount;
+    // Per-pixel coverage in 0..255, one byte per pixel, or NULL for texture pages.
+    // Surfaces are RGBA upstream and the Chapter 4/5 shadow systems blend against
+    // their alpha channel; a single transparent bit cannot represent "40% covered",
+    // which is what made the sun shadows come out as a solid white band.
+    uint8_t* alphaPlane;
 }
 SWTexture;
 
@@ -74,6 +79,9 @@ typedef struct
     // Framebuffer
     uintpixel_t* fb;
     uint16_t fbPitch; // in sizeof(uintpixel_t) units, NOT in bytes!
+    // (The current target's coverage plane is derived on demand - see
+    // swrTargetCoverage() - because the writable texture can be swapped or freed
+    // between draws.)
     
     bool drawingToSurface;
     uintpixel_t* mainFb;
@@ -165,6 +173,25 @@ typedef struct
     } shaderUniforms[SWR_SHADER_UNIFORMS];
 }
 SWRenderer;
+
+// Coverage plane of the surface currently being drawn into, or NULL when drawing
+// straight to the screen. Surfaces are RGBA upstream; this is where their alpha
+// channel lives. Indexed with fbPitch, since it is one byte per pixel.
+FORCE_INLINE uint8_t* swrTargetCoverage(SWRenderer* swr)
+{
+    if (!swr->drawingToSurface)
+        return NULL;
+
+    const int index = swr->currentSurfaceIndex;
+    if (index < 0 || (size_t) index >= swr->surfaceCount)
+        return NULL;
+
+    SWSurface* surface = swr->surfaces[index];
+    if (surface == NULL || surface->texture == NULL)
+        return NULL;
+
+    return surface->texture->alphaPlane;
+}
 
 // True when the renderer is drawing into a surface. Every read of the draw target
 // goes through this instead of looking at `drawingToSurface` directly: the flag and
