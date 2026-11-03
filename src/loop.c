@@ -2031,8 +2031,19 @@ int loop(CommandLineArgs args, const char *argv0) {
                 if (loadStateNow) {
                     menuLoadRequest = false;
                     if (loadStateFrame >= 0) loadStateFrameDone = true;
-                    const bool loaded = SaveState_load(runner, statePath);
-                    snprintf(skipBanner, sizeof(skipBanner), "%s", loaded ? "STATE LOADED" : "NO STATE");
+                    const SaveStateLoadResult loaded = SaveState_load(runner, statePath);
+                    // Say which failure it was: "no state" for a state that exists but
+                    // was written by the launcher or another chapter sends the reader
+                    // looking for a missing file that is right there.
+                    const char* banner = "STATE UNREADABLE";
+                    switch (loaded) {
+                        case SaveStateLoad_Ok: banner = "STATE LOADED"; break;
+                        case SaveStateLoad_NoFile: banner = "NO STATE FILE"; break;
+                        case SaveStateLoad_OtherGame: banner = "STATE IS OTHER GAME"; break;
+                        case SaveStateLoad_Unreadable:
+                        case SaveStateLoad_BadArgs: break;
+                    }
+                    snprintf(skipBanner, sizeof(skipBanner), "%s", banner);
                     skipBannerUntil = nowNanos() + 1500000000ull;
                 }
                 if (gfx == SOFTWARE && (keyJustPressed(runner->keyboard, captureKey) ||

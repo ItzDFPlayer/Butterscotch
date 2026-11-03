@@ -1716,9 +1716,9 @@ static void rdLayers(Reader* r, Runner* runner)
     }
 }
 
-bool SaveState_load(Runner* runner, const char* path)
+SaveStateLoadResult SaveState_load(Runner* runner, const char* path)
 {
-    if (runner == nullptr || path == nullptr) return false;
+    if (runner == nullptr || path == nullptr) return SaveStateLoad_BadArgs;
 
     // Declared before the first goto target so the failure path can always clean up.
     Loader loader = {0};
@@ -1727,13 +1727,13 @@ bool SaveState_load(Runner* runner, const char* path)
     if (file == nullptr)
     {
         logWarn("SaveState: no state file at '%s'\n", path);
-        return false;
+        return SaveStateLoad_NoFile;
     }
 
-    if (fseek(file, 0, SEEK_END) != 0) { fclose(file); return false; }
+    if (fseek(file, 0, SEEK_END) != 0) { fclose(file); return SaveStateLoad_Unreadable; }
     const long length = ftell(file);
-    if (length < 16) { fclose(file); return false; }
-    if (fseek(file, 0, SEEK_SET) != 0) { fclose(file); return false; }
+    if (length < 16) { fclose(file); return SaveStateLoad_Unreadable; }
+    if (fseek(file, 0, SEEK_SET) != 0) { fclose(file); return SaveStateLoad_Unreadable; }
 
     uint8_t* bytes = (uint8_t*) safeMalloc((size_t) length);
     const size_t read = fread(bytes, 1, (size_t) length, file);
@@ -1741,7 +1741,7 @@ bool SaveState_load(Runner* runner, const char* path)
     if (read != (size_t) length)
     {
         free(bytes);
-        return false;
+        return SaveStateLoad_Unreadable;
     }
 
     Reader r = { .data = bytes, .size = (size_t) length, .position = 0, .ok = true };
@@ -1755,14 +1755,14 @@ bool SaveState_load(Runner* runner, const char* path)
     {
         logError("SaveState: '%s' is not a save state\n", path);
         free(bytes);
-        return false;
+        return SaveStateLoad_Unreadable;
     }
     if (version != SAVE_STATE_VERSION)
     {
         logError("SaveState: '%s' was written by another version (%u, expected %u)\n",
                  path, (unsigned) version, (unsigned) SAVE_STATE_VERSION);
         free(bytes);
-        return false;
+        return SaveStateLoad_Unreadable;
     }
     if (fingerprint != SaveState_gameId(runner->dataWin))
     {
@@ -1773,7 +1773,7 @@ bool SaveState_load(Runner* runner, const char* path)
         logError("SaveState: '%s' belongs to a different game (state is %08x, this game is %s)\n",
                  path, (unsigned) fingerprint, live);
         free(bytes);
-        return false;
+        return SaveStateLoad_OtherGame;
     }
 
     // Everything checks out, so the live game can be torn down. From here on a
@@ -1794,7 +1794,7 @@ bool SaveState_load(Runner* runner, const char* path)
         logError("SaveState: state names room %d, which this game does not have\n",
                  (int) roomIndex);
         free(bytes);
-        return false;
+        return SaveStateLoad_Unreadable;
     }
 
     rdScalarsRest(&r, runner);
@@ -1933,12 +1933,12 @@ failed:
     if (!r.ok)
     {
         logError("SaveState: '%s' could not be fully restored\n", path);
-        return false;
+        return SaveStateLoad_Unreadable;
     }
 
     logInfo("SaveState: loaded room %d, %d instances, %d globals\n",
             runner->currentRoomIndex, (int) arrlen(runner->instances),
             (int) (runner->vmContext != nullptr && runner->vmContext->globalScopeInstance != nullptr
                    ? runner->vmContext->globalScopeInstance->selfVars.count : 0u));
-    return true;
+    return SaveStateLoad_Ok;
 }

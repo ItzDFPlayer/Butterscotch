@@ -25,7 +25,19 @@ struct DataWin;
 // chunk counts, and loading refuses a mismatch.
 
 bool SaveState_save(struct Runner* runner, const char* path);
-bool SaveState_load(struct Runner* runner, const char* path);
+
+// Why a load did not happen. The caller shows one short banner for a failed load,
+// and "no state" for a file that exists but belongs to another chapter sends the
+// wrong person looking for the wrong problem.
+typedef enum SaveStateLoadResult {
+    SaveStateLoad_Ok = 0,
+    SaveStateLoad_BadArgs,
+    SaveStateLoad_NoFile,   // nothing has been saved to that path yet
+    SaveStateLoad_Unreadable, // exists, but truncated, or not this format/version
+    SaveStateLoad_OtherGame,  // written by a different data.win
+} SaveStateLoadResult;
+
+SaveStateLoadResult SaveState_load(struct Runner* runner, const char* path);
 
 // 32-bit identity of a data.win: the game name, its id and a few chunk counts. Used
 // both to reject a state that belongs to another game and to give each game its own

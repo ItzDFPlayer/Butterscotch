@@ -130,8 +130,12 @@ SAVES=$(cd "$SAVES" && pwd)
 
 
 # F5/F6 (Start+L1 / Start+R1 on the handheld) store and reload a snapshot of the
-# VM. Keep it with the saves so it never lands in the Steam install.
-export BUTTERSCOTCH_STATE_PATH=${BUTTERSCOTCH_STATE_PATH:-$SAVES/butterscotch-state.sav}
+# VM next to the other saves. The runner names that file after the folder the
+# running data.win lives in (butterscotch-state-chapter5_windows.sav), so every
+# chapter and the launcher keep their own snapshot. Do NOT pin one shared path
+# here: this script starts the full-game launcher by default, and a single file
+# meant a chapter's state was refused as "another game" on the next run.
+# Set BUTTERSCOTCH_STATE_PATH yourself only to force one exact file.
 # --- log file --------------------------------------------------------------
 
 # Log by default: a crash then leaves its last lines on disk instead of only in
