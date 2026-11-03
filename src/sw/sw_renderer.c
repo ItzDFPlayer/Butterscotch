@@ -795,13 +795,15 @@ static void SWRenderer_drawTextColor(Renderer* renderer, const char* text, float
                                      float lineSeparation)
 {
     SWRenderer* swr = (SWRenderer*) renderer;
-    
-    // TODO: allow c2, c3, c4
-    (void) c2;
-    (void) c3;
-    (void) c4;
-    
-    swrDrawText(swr, text, x, y, xscale, yscale, angleDeg, c1, renderer->drawAlpha, lineSeparation);
+
+    if (swr->traceDraws) {
+        logInfo("TEXTCOLOR '%s' at %g,%g c1=%06X c2=%06X c3=%06X c4=%06X\n",
+                text != nullptr ? text : "(null)", (double) x, (double) y,
+                (unsigned) c1, (unsigned) c2, (unsigned) c3, (unsigned) c4);
+    }
+
+    swrDrawTextGradient(swr, text, x, y, xscale, yscale, angleDeg, c1, c2, c3, c4,
+                        renderer->drawAlpha, lineSeparation);
 }
 
 // Timed wrappers: the profiler has to see the whole call, off-screen rejection

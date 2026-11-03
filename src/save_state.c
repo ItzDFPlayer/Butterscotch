@@ -1936,8 +1936,11 @@ failed:
         return SaveStateLoad_Unreadable;
     }
 
-    logInfo("SaveState: loaded room %d, %d instances, %d globals\n",
-            runner->currentRoomIndex, (int) arrlen(runner->instances),
+    // The frame number is worth printing: a state restores the frame counter too, so
+    // the frames that follow a load are numbered from where the state was taken and
+    // not from where the load happened.
+    logInfo("SaveState: loaded room %d at frame %d, %d instances, %d globals\n",
+            runner->currentRoomIndex, (int) runner->frameCount, (int) arrlen(runner->instances),
             (int) (runner->vmContext != nullptr && runner->vmContext->globalScopeInstance != nullptr
                    ? runner->vmContext->globalScopeInstance->selfVars.count : 0u));
     return SaveStateLoad_Ok;

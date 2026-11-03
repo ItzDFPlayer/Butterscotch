@@ -23,4 +23,13 @@ void swrDrawTexturedTriangle(Renderer* renderer, const SWTexture* texture,
 
 void swrDrawText(SWRenderer* swr, const char* text, float x, float y, float xscale, float yscale, float angleDeg, int32_t color, float alpha, float lineSeparation);
 
+// Same, but with GameMaker's four corner colours spread across the string: each glyph
+// takes the slice of the gradient its own columns cover, and the glyph itself is drawn
+// as a bilinear ramp between those four corners. GameMaker treats the corners as the
+// whole string's box, so a gradient is never one flat colour per letter.
+void swrDrawTextGradient(SWRenderer* swr, const char* text, float x, float y,
+                         float xscale, float yscale, float angleDeg,
+                         int32_t c1, int32_t c2, int32_t c3, int32_t c4,
+                         float alpha, float lineSeparation);
+
 #endif//_SW_DRAWING_H

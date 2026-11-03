@@ -91,8 +91,13 @@ static void swrTraceDraw(SWRenderer* swr, const char* kind, const SWTexture* tex
     if (swr->shaderIndex >= 0 && dataWin != nullptr && (uint32_t) swr->shaderIndex < dataWin->shdr.count)
         shaderName = dataWin->shdr.shaders[swr->shaderIndex].name;
 
-    logInfo("DRAW %-8s page=%2d src=%4d,%4d,%4d,%4d dst=%5d,%5d,%4d,%4d alpha=%3d tint=%04X blend=%d mask=%04X mode=%d surf=%d shd=%s swr=%p\n",
-            kind, page, sx, sy, sw, sh, dx, dy, dw, dh, alpha, (unsigned) (tint & 0x7FFF),
+    // Report both ends: the GameMaker colour the game asked for and the RGB555 value
+    // the blitter will actually multiply the sprite by. The old line printed a masked
+    // truncation of the raw colour, which cannot be turned back into either one.
+    const unsigned rawColor = (unsigned) (tint & 0xFFFFFFu);
+    const unsigned blitColor = (unsigned) (swrConvertPixel(tint) & 0x7FFFu);
+    logInfo("DRAW %-8s page=%2d src=%4d,%4d,%4d,%4d dst=%5d,%5d,%4d,%4d alpha=%3d tint=%04X raw=%06X blend=%d mask=%04X mode=%d surf=%d shd=%s swr=%p\n",
+            kind, page, sx, sy, sw, sh, dx, dy, dw, dh, alpha, blitColor, rawColor,
             swr->blendMode, (unsigned) swr->writeMask, swr->pixelMode,
             swrIsOnSurface(swr) ? swr->currentSurfaceIndex : -1, shaderName, (void*) swr);
 }
@@ -1818,7 +1823,87 @@ void swrDrawTexturedTriangle(Renderer* renderer, const SWTexture* texture,
                               srcalpha, invalpha);
 }
 
-void swrDrawText(SWRenderer* swr, const char* text, float x, float y, float xscale, float yscale, float angleDeg, int32_t color, float alpha, float lineSeparation)
+// ====[ Glyph colour gradients ]====
+//
+// draw_text_*_color takes four corner colours and GameMaker interpolates them across
+// the drawn string, so a glyph is not one flat colour: Deltarune's dialogue draws the
+// coloured word of a line as white at the top of the letters fading to green at the
+// bottom. Pick a single representative colour per glyph and the whole word turns a
+// pale wash of that average, which is left looking lighter than the solid-colour
+// shadow underneath it -- the shadow has to be a real gradient too, not a mixture.
+//
+// The blending is per pixel over the glyph box: bilinear between the four corners,
+// which matches what the GPU renderer and the original engine do.
+FORCE_INLINE uintpixel_t swrLerpRgb555(uintpixel_t a, uintpixel_t b, int t)
+{
+    const int it = 255 - t;
+    const int blue  = (((a      ) & 0x1F) * it + ((b      ) & 0x1F) * t) / 255;
+    const int green = (((a >>  5) & 0x1F) * it + ((b >>  5) & 0x1F) * t) / 255;
+    const int red   = (((a >> 10) & 0x1F) * it + ((b >> 10) & 0x1F) * t) / 255;
+    return (uintpixel_t) (blue | (green << 5) | (red << 10));
+}
+
+// True when a glyph can use the gradient path: no scaling (the source rect and the
+// destination rect are the same size), no rotation, and none of the extended pixel
+// modes, which have their own scalar loops in swrDrawSpriteInternal.
+static bool swrGlyphCanGradient(const SWRenderer* swr, float dw, float dh, int sw, int sh, bool mustRotate)
+{
+    if (mustRotate || swr->pixelMode != SWR_PIXEL_LEGACY || swr->writeMask != 0xF) return false;
+    if (sw == 0 || sh == 0) return false;
+    return swrCeiling(dw) == sw && swrCeiling(dh) == sh;
+}
+
+static void swrBlendGlyphGradient(SWRenderer* swr, int dx, int dy,
+                                  const SWTexture* texture, int sx, int sy, int sw, int sh,
+                                  int32_t c1, int32_t c2, int32_t c3, int32_t c4, int alpha)
+{
+    // GameMaker orders the corners top-left, top-right, bottom-right, bottom-left.
+    const uintpixel_t t1 = swrConvertPixel((uint32_t) c1);
+    const uintpixel_t t2 = swrConvertPixel((uint32_t) c2);
+    const uintpixel_t t3 = swrConvertPixel((uint32_t) c3);
+    const uintpixel_t t4 = swrConvertPixel((uint32_t) c4);
+
+    const int minx = swr->portX, miny = swr->portY;
+    const int maxx = swr->portX + swr->portW, maxy = swr->portY + swr->portH;
+    if (dx >= maxx || dy >= maxy) return;
+    if (dx + sw <= minx || dy + sh <= miny) return;
+
+    int startX = 0, endX = sw, startY = 0, endY = sh;
+    if (dx < minx) startX = minx - dx;
+    if (dy < miny) startY = miny - dy;
+    if (dx + sw > maxx) endX = maxx - dx;
+    if (dy + sh > maxy) endY = maxy - dy;
+    if (startX >= endX || startY >= endY) return;
+
+    const int srcalpha = swrCalcSrcAlpha(swr, alpha);
+    const int dstalpha = swrCalcDstAlpha(swr, alpha);
+    if (srcalpha == 0) return;
+
+    swr->pxWritten += (uint64_t) (endX - startX) * (uint64_t) (endY - startY);
+    swr->pxScalarBlend += (uint64_t) (endX - startX) * (uint64_t) (endY - startY);
+
+    for (int y = startY; y < endY; y++)
+    {
+        const uintpixel_t* srcline = &texture->buffer[(size_t) (sy + y) * texture->width + sx];
+        uintpixel_t* dstline = &swr->fb[(size_t) (dy + y) * swr->fbPitch + dx];
+        const int v = (sh > 1) ? ((y * 255) / (sh - 1)) : 0;
+        for (int x = startX; x < endX; x++)
+        {
+            const uintpixel_t pixel = srcline[x];
+            if (!opaque(pixel)) continue;
+            const int u = (sw > 1) ? ((x * 255) / (sw - 1)) : 0;
+            const uintpixel_t top = swrLerpRgb555(t1, t2, u);
+            const uintpixel_t bottom = swrLerpRgb555(t4, t3, u);
+            const uintpixel_t colour = swrLerpRgb555(top, bottom, v);
+            alphaBlend(&dstline[x], tint(colour, pixel), srcalpha, dstalpha);
+        }
+    }
+}
+
+void swrDrawTextGradient(SWRenderer* swr, const char* text, float x, float y,
+                         float xscale, float yscale, float angleDeg,
+                         int32_t c1, int32_t c2, int32_t c3, int32_t c4,
+                         float alpha, float lineSeparation)
 {
     Renderer* renderer = &swr->base;
     DataWin* dwin = renderer->dataWin;
@@ -1876,6 +1961,11 @@ void swrDrawText(SWRenderer* swr, const char* text, float x, float y, float xsca
         else if (renderer->drawHalign == 2) halignOffset = -lineWidth;
 
         float cursorX = halignOffset;
+        // Where this glyph starts along the line, as a fraction: GameMaker's
+        // draw_text_*_color takes four corner colours for the whole string, so the
+        // colour of a glyph depends on where it sits in it.
+        float gradientX = 0.0f;
+        const bool gradient = c1 != c2 || c2 != c3 || c3 != c4;
 
         // Render each glyph in the line - decode each codepoint once and carry it forward as next iteration's ch (also used for kerning)
         int32_t pos = 0;
@@ -1893,6 +1983,24 @@ void swrDrawText(SWRenderer* swr, const char* text, float x, float y, float xsca
             bool hasNext = lineLen > pos;
             if (hasNext) nextCh = TextUtils_decodeUtf8(text + lineStart, lineLen, &pos);
 
+            // The gradient runs across the whole string, so a glyph keeps only the
+            // slice of it that its own column covers. Averaging those slices into one
+            // colour is the fallback for glyphs that cannot be drawn per pixel.
+            int32_t glyphColor = c1;
+            int32_t g1 = c1, g2 = c2, g3 = c3, g4 = c4;
+            float advance = (glyph != nullptr) ? (float) glyph->shift : 0.0f;
+            if (gradient)
+            {
+                const float leftFrac = (lineWidth > 0.0f) ? (gradientX / lineWidth) : 0.0f;
+                const float rightFrac = (lineWidth > 0.0f) ? ((gradientX + advance) / lineWidth) : 1.0f;
+                g1 = Color_lerp(c1, c2, leftFrac);
+                g2 = Color_lerp(c1, c2, rightFrac);
+                g3 = Color_lerp(c4, c3, rightFrac);
+                g4 = Color_lerp(c4, c3, leftFrac);
+                glyphColor = Color_lerp(Color_lerp(g1, g2, 0.5f),
+                                        Color_lerp(g4, g3, 0.5f), 0.5f);
+            }
+
             if (glyph != nullptr) {
                 bool drewSuccessfully = false;
                 if (glyph->sourceWidth != 0 && glyph->sourceHeight != 0) {
@@ -1903,7 +2011,7 @@ void swrDrawText(SWRenderer* swr, const char* text, float x, float y, float xsca
                             &fontTpagIndex, &pageId, &sx, &sy, &sw, &sh, &dx, &dy))
                     {
                         dx *= xscale; dx += x;
-                        dy *= xscale; dy += y;
+                        dy *= yscale; dy += y;
                         dw = swrCeiling(xscale * glyph->sourceWidth);
                         dh = swrCeiling(yscale * glyph->sourceHeight);
                         
@@ -1922,11 +2030,30 @@ void swrDrawText(SWRenderer* swr, const char* text, float x, float y, float xsca
                             float ndy = sinA * dx + cosA * dy;
                             ndx += x;
                             ndy += y;
-                            swrDrawSpriteRotated(renderer, ndx, ndy, dw, dh, texture, sx, sy, sw, sh, color, alpha, angleDeg, 0.0f, 0.0f);
+                            swrDrawSpriteRotated(renderer, ndx, ndy, dw, dh, texture, sx, sy, sw, sh, glyphColor, alpha, angleDeg, 0.0f, 0.0f);
                         }
                         else
                         {
-                            swrDrawSprite(renderer, dx, dy, dw, dh, texture, sx, sy, sw, sh, color, alpha);
+                            // Same view transform swrDrawSprite applies: HUD text is drawn
+                            // in game coordinates, and skipping this put the glyph outside
+                            // the window while its shadow stayed on screen.
+                            float gdxF = dx, gdyF = dy, gdwF = dw, gdhF = dh;
+                            swrTransformPosIfNeeded(swr, &gdxF, &gdyF);
+                            swrTransformSizeIfNeeded(swr, &gdwF, &gdhF);
+
+                            if (gradient && swrGlyphCanGradient(swr, gdwF, gdhF, sw, sh, mustRotate))
+                            {
+                                const int gdx = swrFloor(gdxF), gdy = swrFloor(gdyF);
+                                swrTraceDraw(swr, "glyph", texture, sx, sy, sw, sh,
+                                             gdx, gdy, sw, sh, swrIntAlpha(alpha), (uint32_t) g1);
+                                swrBlendGlyphGradient(swr, gdx, gdy, texture, sx, sy, sw, sh,
+                                                      g1, g2, g3, g4, swrIntAlpha(alpha));
+                            }
+                            else
+                            {
+                                swrDrawSprite(renderer, dx, dy, dw, dh, texture, sx, sy, sw, sh,
+                                              glyphColor, alpha);
+                            }
                         }
                         
                         drewSuccessfully = true;
@@ -1934,8 +2061,11 @@ void swrDrawText(SWRenderer* swr, const char* text, float x, float y, float xsca
                 }
 
                 cursorX += glyph->shift;
+                gradientX += glyph->shift;
                 if (drewSuccessfully && hasNext) {
-                    cursorX += TextUtils_getKerningOffset(glyph, nextCh);
+                    float kerning = TextUtils_getKerningOffset(glyph, nextCh);
+                    cursorX += kerning;
+                    gradientX += kerning;
                 }
             }
 
@@ -1951,4 +2081,9 @@ void swrDrawText(SWRenderer* swr, const char* text, float x, float y, float xsca
             lineStart = lineEnd;
         }
     }
+}
+
+void swrDrawText(SWRenderer* swr, const char* text, float x, float y, float xscale, float yscale, float angleDeg, int32_t color, float alpha, float lineSeparation)
+{
+    swrDrawTextGradient(swr, text, x, y, xscale, yscale, angleDeg, color, color, color, color, alpha, lineSeparation);
 }
