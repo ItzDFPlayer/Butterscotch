@@ -624,6 +624,25 @@ uint32_t SaveState_gameId(DataWin* dataWin)
     return hash;
 }
 
+void SaveState_describeIdentity(DataWin* dataWin, char* buf, size_t size)
+{
+    if (buf == nullptr || size == 0) return;
+    if (dataWin == nullptr)
+    {
+        snprintf(buf, size, "<no game>");
+        return;
+    }
+
+    snprintf(buf, size, "%08x (name='%s' gameID=%d rooms=%u objects=%u sprites=%u code=%u)",
+             (unsigned) SaveState_gameId(dataWin),
+             dataWin->gen8.name != nullptr ? dataWin->gen8.name : "",
+             (int) dataWin->gen8.gameID,
+             (unsigned) dataWin->room.count,
+             (unsigned) dataWin->objt.count,
+             (unsigned) dataWin->sprt.count,
+             (unsigned) dataWin->code.count);
+}
+
 static void wrGlobals(Writer* w, Graph* g, Instance* globalScope)
 {
     if (globalScope == nullptr)
@@ -1042,8 +1061,9 @@ bool SaveState_save(Runner* runner, const char* path)
         if (fclose(w.file) != 0) w.ok = false;
     }
 
-    logInfo("SaveState: saved %u instances (%u arrays, %u methods) to '%s'\n",
-            instanceCount, (unsigned) arrlen(graph.arrays), (unsigned) arrlen(graph.methods), path);
+    logInfo("SaveState: saved %u instances (%u arrays, %u methods) to '%s' [game %08x]\n",
+            instanceCount, (unsigned) arrlen(graph.arrays), (unsigned) arrlen(graph.methods), path,
+            (unsigned) SaveState_gameId(dataWin));
 
     graphFree(&graph);
     return w.ok;
@@ -1651,7 +1671,12 @@ bool SaveState_load(Runner* runner, const char* path)
     }
     if (fingerprint != SaveState_gameId(runner->dataWin))
     {
-        logError("SaveState: '%s' belongs to a different game\n", path);
+        // Say what actually differs. A bare "different game" leaves nothing to act
+        // on when the state was written by this very build.
+        char live[256];
+        SaveState_describeIdentity(runner->dataWin, live, sizeof(live));
+        logError("SaveState: '%s' belongs to a different game (state is %08x, this game is %s)\n",
+                 path, (unsigned) fingerprint, live);
         free(bytes);
         return false;
     }

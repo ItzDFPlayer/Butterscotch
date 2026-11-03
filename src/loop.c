@@ -2070,6 +2070,23 @@ int loop(CommandLineArgs args, const char *argv0) {
                 }
 
 
+                // Optional game-identity heartbeat. Save states are rejected when the
+                // live data.win identity no longer matches the file, and that identity
+                // should never change while a chapter is loaded; printing it lets a
+                // "belongs to a different game" report show the frame it moved.
+                {
+                    static bool idLogEnabled = false;
+                    static bool idLogChecked = false;
+                    if (!idLogChecked) {
+                        idLogChecked = true;
+                        idLogEnabled = envFlagSet("BUTTERSCOTCH_LOG_GAME_ID");
+                    }
+                    if (idLogEnabled && runner->frameCount % 120 == 0) {
+                        char identity[256];
+                        SaveState_describeIdentity(dataWin, identity, sizeof(identity));
+                        logInfo("Game identity: %s\n", identity);
+                    }
+                }
                 if (args.profilerFramesBetween > 0 && runner->frameCount > 0 && runner->frameCount % args.profilerFramesBetween == 0) {
                     char* profilerReport = Profiler_createReport(vm->profiler, 20, args.profilerFramesBetween);
                     if (profilerReport != nullptr) {

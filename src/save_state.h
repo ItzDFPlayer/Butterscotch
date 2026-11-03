@@ -2,6 +2,7 @@
 #define _BS_SAVE_STATE_H_
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 struct Runner;
@@ -30,5 +31,10 @@ bool SaveState_load(struct Runner* runner, const char* path);
 // both to reject a state that belongs to another game and to give each game its own
 // state file, so chapters and games cannot overwrite each other's snapshot.
 uint32_t SaveState_gameId(struct DataWin* dataWin);
+
+// Renders the identity fields behind SaveState_gameId into buf, so a mismatch can be
+// reported with the part that moved (name, game id, chunk counts) instead of just
+// "different game".
+void SaveState_describeIdentity(struct DataWin* dataWin, char* buf, size_t size);
 
 #endif//_BS_SAVE_STATE_H_
