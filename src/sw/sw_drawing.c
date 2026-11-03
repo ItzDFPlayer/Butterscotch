@@ -119,6 +119,15 @@ FORCE_INLINE swrVec8 swrSplat8(uint16_t value)
     return out;
 }
 
+// True when all eight pixels are opaque, i.e. the group can be stored whole.
+FORCE_INLINE bool swrVecAllOpaque(swrVec8 src)
+{
+    const swrVec8 bits = src & swrSplat8(0x8000);
+    uint64_t halves[2];
+    memcpy(halves, &bits, sizeof(halves));
+    return (halves[0] & halves[1]) == 0x8000800080008000ull;
+}
+
 FORCE_INLINE swrVec8 swrMinVec(swrVec8 a, swrVec8 b)
 {
     swrVec8 lower = (a < b);
@@ -510,8 +519,8 @@ static void swrDrawLineInt(Renderer* renderer, int x1, int y1, int x2, int y2, M
 }
 
 // Copies one run of destination pixels from a 1:1 source, skipping transparent
-// source pixels. Four pixels are tested at a time so a completely opaque run turns
-// into a single 8-byte load/store pair instead of four per-pixel branches.
+// source pixels. Eight pixels are tested at a time so a completely opaque group turns
+// into one 16-byte load and one 16-byte store instead of eight per-pixel branches.
 //
 // Tile maps and background layers are mostly opaque runs, and they are the bulk of
 // what a software renderer spends its time on, so this is worth the special case.
@@ -525,20 +534,18 @@ FORCE_INLINE void swrCopyRunOpaque(uintpixel_t* dst, const uintpixel_t* src, int
 #if PIXEL_SIZE == 16
     int x = 0;
 
-    for (; x + 4 <= count; x += 4)
+    for (; x + 8 <= count; x += 8)
     {
-        uint64_t quad;
-        memcpy(&quad, src + x, sizeof(quad));
+        swrVec8 group;
+        memcpy(&group, src + x, sizeof(group));
 
-        if ((quad & 0x8000800080008000ull) == 0x8000800080008000ull)
+        if (swrVecAllOpaque(group))
         {
-            swrAliasWord* words = (swrAliasWord*) (void*) (dst + x);
-            words[0] = (uint32_t) quad;
-            words[1] = (uint32_t) (quad >> 32);
+            memcpy(dst + x, &group, sizeof(group));
         }
         else
         {
-            for (int i = 0; i < 4; i++)
+            for (int i = 0; i < 8; i++)
             {
                 uintpixel_t pixel = src[x + i];
                 if (opaque(pixel)) dst[x + i] = pixel;
@@ -982,8 +989,14 @@ static void swrDrawSpriteInternal(
             for (int y = 0; y < dh; y++)
             {
                 const uintpixel_t* srcline = &texture->buffer[(sy + y) * texture->width + sx];
-                uintpixel_t* dstline = &swr->fb[(dy + y) * swr->fbPitch + dx];
 
+                // A layer that reaches across the screen is mostly empty in the rows
+                // above and below what it actually covers. Scanning eight pixels at a
+                // time costs a fraction of the copy, and a row with no opaque pixel
+                // in it would otherwise be walked pixel by pixel for nothing.
+                if (!swrRowAnyOpaque(srcline, dw)) continue;
+
+                uintpixel_t* dstline = &swr->fb[(dy + y) * swr->fbPitch + dx];
                 swrCopyRunOpaque(dstline, srcline, dw);
             }
         }
@@ -1018,6 +1031,11 @@ static void swrDrawSpriteInternal(
             swr->pxFastCopy += (uint64_t) dw * (uint64_t) dh;
 
             const bool unitXStep = (oxs2 == (fixedp_t) (1 << fp_prec));
+            // Exact 2x across: the whole room's grass and cliff bands are sprite
+            // parts blown up by two, and stepping a fixed-point counter per output
+            // pixel is most of what those rows cost. Writing each source pixel twice
+            // walks the source once, in order, with no per-pixel index maths.
+            const bool doubleXStep = (oxs2 * 2 == (fixedp_t) (1 << fp_prec));
             fixedp_t ys2 = iys2;
             for (int y = 0, ys = iys; y < dh; y++, ys += oys, ys2 += oys2)
             {
@@ -1035,6 +1053,58 @@ static void swrDrawSpriteInternal(
                     if (xoff >= 0 && xoff + dw <= (int) texture->width)
                     {
                         swrCopyRunOpaque(dstline, srcline + xoff, dw);
+                        continue;
+                    }
+                }
+                else if (doubleXStep)
+                {
+                    const int xoff = (int) (ixs2 >> fp_prec);
+                    const int pairs = dw >> 1;
+                    if (xoff >= 0 && xoff + pairs <= (int) texture->width)
+                    {
+                        int x = 0;
+                        for (; x + 8 <= pairs; x += 8)
+                        {
+                            swrVec8 group;
+                            memcpy(&group, srcline + xoff + x, sizeof(group));
+                            if (swrVecAllOpaque(group))
+                            {
+                                // Nothing transparent in the group, so the pixels can be
+                                // duplicated without testing each one.
+                                for (int i = 0; i < 8; i++)
+                                {
+                                    const uintpixel_t pixel = srcline[xoff + x + i];
+                                    dstline[2 * (x + i)] = pixel;
+                                    dstline[2 * (x + i) + 1] = pixel;
+                                }
+                            }
+                            else
+                            {
+                                for (int i = 0; i < 8; i++)
+                                {
+                                    const uintpixel_t pixel = srcline[xoff + x + i];
+                                    if (opaque(pixel))
+                                    {
+                                        dstline[2 * (x + i)] = pixel;
+                                        dstline[2 * (x + i) + 1] = pixel;
+                                    }
+                                }
+                            }
+                        }
+                        for (; x < pairs; x++)
+                        {
+                            const uintpixel_t pixel = srcline[xoff + x];
+                            if (opaque(pixel))
+                            {
+                                dstline[2 * x] = pixel;
+                                dstline[2 * x + 1] = pixel;
+                            }
+                        }
+                        if (dw & 1)
+                        {
+                            const uintpixel_t pixel = srcline[xoff + pairs];
+                            if (opaque(pixel)) dstline[dw - 1] = pixel;
+                        }
                         continue;
                     }
                 }
@@ -1616,6 +1686,20 @@ void swrFillRectangleColor(Renderer* renderer, float x1, float y1, float x2, flo
     }
 }
 
+// Diagnostic switch: with BUTTERSCOTCH_DIAG_NODRAW=1 every sprite blit returns
+// immediately, so a frame's cost can be split into "the game's own code" and "the
+// pixels". Nothing else changes, so the draw list and the VM work stay identical.
+static bool swrDiagNoDraw(void)
+{
+    static int cached = -1;
+    if (cached < 0)
+    {
+        const char* env = getenv("BUTTERSCOTCH_DIAG_NODRAW");
+        cached = (env != nullptr && env[0] != '\0' && env[0] != '0') ? 1 : 0;
+    }
+    return cached != 0;
+}
+
 void swrDrawSprite(
     Renderer* renderer, float dx, float dy, float dw, float dh,
     SWTexture* texture, int sx, int sy, int sw, int sh,
@@ -1623,6 +1707,13 @@ void swrDrawSprite(
 )
 {
     SWRenderer *swr = (SWRenderer*) renderer;
+
+    if (UNLIKELY(swrDiagNoDraw())) return;
+
+    // A fully faded-out sprite writes nothing under the normal blend, but the blit
+    // below would still walk its whole rectangle to find that out. Deltarune fades
+    // whole full-screen parallax layers out this way, so the walk is not free.
+    if (UNLIKELY(alpha <= 0.0f) && swr->blendMode == 0 && swr->pixelMode == SWR_PIXEL_LEGACY) return;
 
     swrTransformPosIfNeeded(swr, &dx, &dy);
     swrTransformSizeIfNeeded(swr, &dw, &dh);
