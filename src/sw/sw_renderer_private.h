@@ -12,7 +12,7 @@
 
 // Capacity of the shader emulation state kept in SWRenderer.
 #define SWR_SHADER_STAGES   8
-#define SWR_SHADER_UNIFORMS 16
+#define SWR_SHADER_UNIFORMS 64
 
 // Provide PI if not specified
 #ifndef M_PI
@@ -173,6 +173,7 @@ typedef struct
     int32_t shaderUniformCount;
     struct SwrShaderUniform
     {
+        int32_t handle;     // name hash, see swrFindUniform()
         char name[24];
         float value[4];
     } shaderUniforms[SWR_SHADER_UNIFORMS];

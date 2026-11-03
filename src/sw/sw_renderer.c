@@ -1328,11 +1328,19 @@ static void SWRenderer_drawSurface(Renderer* renderer, int32_t surfaceID,
     }
 
     if (swrDiagLogEnabled()) {
+        // The bound shader decides whether this draw is a shadow pass: the game blits
+        // silhouette masks through shd_shadowblend/shd_forcecolour, and those draws are
+        // the only ones whose colour does not come from the surface.
+        const char* shader = "-";
+        DataWin* dw = swr->base.dataWin;
+        if (dw != nullptr && swr->shaderIndex >= 0 && (uint32_t) swr->shaderIndex < dw->shdr.count &&
+            dw->shdr.shaders[swr->shaderIndex].name != nullptr)
+            shader = dw->shdr.shaders[swr->shaderIndex].name;
         logInfo("Surf draw     src=%d srcRect=%d,%d,%dx%d dst=%.1f,%.1f scale=%.2f,%.2f angle=%.1f "
-                "tint=%06X alpha=%.3f blend=%d mode=%d to=%d\n",
+                "tint=%06X alpha=%.3f blend=%d mode=%d to=%d shader=%s\n",
                 (int) surfaceID, srcLeft, srcTop, srcWidth, srcHeight, x, y, xscale, yscale,
                 angleDeg, (unsigned) (color & 0xFFFFFF), alpha, swr->blendMode, swr->pixelMode,
-                swrIsOnSurface(swr) ? swr->currentSurfaceIndex : -1);
+                swrIsOnSurface(swr) ? swr->currentSurfaceIndex : -1, shader);
     }
     
     if (srcWidth < 0) {
@@ -1824,20 +1832,45 @@ static void SWRenderer_gpuResetShader(Renderer* renderer)
     swr->shaderIndex = -1;
 }
 
-// Uniform handles are indices into a per-renderer name table, which is how the
-// value set later by shader_set_uniform_f() finds its way to the emulated
-// fragment. The names are stable for the lifetime of the renderer.
+// A uniform handle is a hash of the uniform's name rather than a slot index. The
+// game keeps handles in instance variables for the lifetime of an instance - the
+// chapter 4/5 shadow objects fetch theirs in Create and use them in Draw - so a
+// slot index would be meaningless in the next process: the table is rebuilt in a
+// different order, and a save state restores the old numbers. A name hash is the
+// same number everywhere, so those handles keep working across a save/load.
+static int32_t swrUniformHash(const char* name)
+{
+    uint32_t hash = 2166136261u;
+    for (const unsigned char* p = (const unsigned char*) name; *p != '\0'; p++)
+    {
+        hash ^= (uint32_t) *p;
+        hash *= 16777619u;
+    }
+    return (int32_t) (hash & 0x7FFFFFFF);
+}
+
 static int32_t swrFindUniform(SWRenderer* swr, const char* name)
 {
+    const int32_t handle = swrUniformHash(name);
     for (int32_t i = 0; i < swr->shaderUniformCount; i++)
     {
-        if (strcmp(swr->shaderUniforms[i].name, name) == 0) return i;
+        if (swr->shaderUniforms[i].handle == handle) return handle;
     }
     if (swr->shaderUniformCount >= SWR_SHADER_UNIFORMS) return -1;
-    int32_t index = swr->shaderUniformCount++;
-    snprintf(swr->shaderUniforms[index].name, sizeof(swr->shaderUniforms[index].name),
-             "%s", name);
-    return index;
+    struct SwrShaderUniform* uniform = &swr->shaderUniforms[swr->shaderUniformCount++];
+    uniform->handle = handle;
+    snprintf(uniform->name, sizeof(uniform->name), "%s", name);
+    return handle;
+}
+
+static struct SwrShaderUniform* swrUniformByHandle(SWRenderer* swr, int32_t handle)
+{
+    if (handle < 0) return nullptr;
+    for (int32_t i = 0; i < swr->shaderUniformCount; i++)
+    {
+        if (swr->shaderUniforms[i].handle == handle) return &swr->shaderUniforms[i];
+    }
+    return nullptr;
 }
 
 static int32_t SWRenderer_shaderGetUniform(Renderer* renderer, int32_t shaderIndex, char* uniform)
@@ -1862,12 +1895,13 @@ static int32_t SWRenderer_shaderGetSamplerIndex(Renderer* renderer, int32_t shad
 static void SWRenderer_shaderSetUniformF(Renderer* renderer, int32_t handle, int32_t count, float value1, float value2, float value3, float value4)
 {
     SWRenderer* swr = (SWRenderer*) renderer;
-    if (handle < 0 || handle >= swr->shaderUniformCount) return;
+    struct SwrShaderUniform* uniform = swrUniformByHandle(swr, handle);
+    if (uniform == nullptr) return;
     float values[4] = { value1, value2, value3, value4 };
     if (count < 1) count = 1;
     if (count > 4) count = 4;
     for (int32_t i = 0; i < count; i++)
-        swr->shaderUniforms[handle].value[i] = values[i];
+        uniform->value[i] = values[i];
 }
 
 static void SWRenderer_shaderSetUniformI(Renderer* renderer, int32_t handle, int32_t count, int32_t value1, int32_t value2, int32_t value3, int32_t value4)
@@ -1875,12 +1909,13 @@ static void SWRenderer_shaderSetUniformI(Renderer* renderer, int32_t handle, int
     // Integer uniforms (shd_ripple's rippleBanding, rippleFading) feed the same table
     // as the float ones; the emulation reads them back as numbers.
     SWRenderer* swr = (SWRenderer*) renderer;
-    if (handle < 0 || handle >= swr->shaderUniformCount) return;
+    struct SwrShaderUniform* uniform = swrUniformByHandle(swr, handle);
+    if (uniform == nullptr) return;
     int32_t values[4] = { value1, value2, value3, value4 };
     if (count < 1) count = 1;
     if (count > 4) count = 4;
     for (int32_t i = 0; i < count; i++)
-        swr->shaderUniforms[handle].value[i] = (float) values[i];
+        uniform->value[i] = (float) values[i];
 }
 
 static void SWRenderer_applyProjection(Renderer* renderer, const Matrix4f* worldToClip, const Matrix4f* idk)

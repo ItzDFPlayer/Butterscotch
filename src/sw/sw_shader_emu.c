@@ -62,6 +62,85 @@ static bool swrUniformVec(const SWRenderer* swr, const char* name, float* out, i
     return false;
 }
 
+// ===[ shd_shadowblend / shd_forcecolour ]===
+//
+//   gl_FragColor = v_vColour * texture2D(gm_BaseTexture, v_vTexcoord);
+//   gl_FragColor.rgb = shadowCol.rgb;
+//   if (gl_FragColor.a > 0.0) gl_FragColor.a = min(shadowCol.a, gl_FragColor.a);
+//
+// and, for the highlight surface,
+//
+//   vec4 col = texture2D(gm_BaseTexture, v_vTexcoord);
+//   gl_FragColor = v_vColour * col;
+//   gl_FragColor.rgb = mix(vec3(0.0), forceColour, col.a);
+//
+// Both read the mask's alpha rather than its colour, so the surfaces only ever
+// need to say "something is here": the colour comes from the uniform.
+static uint16_t swrColourToRgb555(const float* rgb)
+{
+    int r = (int) (rgb[0] * 31.0f + 0.5f);
+    int g = (int) (rgb[1] * 31.0f + 0.5f);
+    int b = (int) (rgb[2] * 31.0f + 0.5f);
+    r = r < 0 ? 0 : (r > 31 ? 31 : r);
+    g = g < 0 ? 0 : (g > 31 ? 31 : g);
+    b = b < 0 ? 0 : (b > 31 ? 31 : b);
+    return (uint16_t) (b | (g << 5) | (r << 10));
+}
+
+bool swrShaderEmuFlatBegin(SWRenderer* swr, SWRFlatShaderCtx* ctx)
+{
+    if (swrShaderNameIs(swr, "shd_shadowblend"))
+    {
+        float shadowCol[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
+        // A uniform the game never set reads as zero, exactly as it would on a GPU:
+        // shd_shadowblend then has alpha 0 and the pass is invisible. Falling through
+        // to the normal sprite path instead would paint the raw white mask, which is
+        // how this scene used to look.
+        swrUniformVec(swr, "shadowCol", shadowCol, 4, 0.0f);
+        ctx->forceColour = false;
+        ctx->colour = swrColourToRgb555(shadowCol);
+        ctx->alpha = (int) (shadowCol[3] * 256.0f + 0.5f);
+        if (ctx->alpha > 256) ctx->alpha = 256;
+        if (ctx->alpha < 0) ctx->alpha = 0;
+        return true;
+    }
+
+    if (swrShaderNameIs(swr, "shd_forcecolour"))
+    {
+        float forceColour[3] = { 0.0f, 0.0f, 0.0f };
+        swrUniformVec(swr, "forceColour", forceColour, 3, 0.0f);
+        ctx->forceColour = true;
+        ctx->colour = swrColourToRgb555(forceColour);
+        ctx->alpha = 256;
+        return true;
+    }
+
+    return false;
+}
+
+void swrShaderEmuFlatPixel(const SWRFlatShaderCtx* ctx, int maskAlpha, int drawAlpha,
+                           uint16_t* outRgb, int* outAlpha)
+{
+    const int a = (drawAlpha * maskAlpha + 127) / 255;
+
+    if (!ctx->forceColour)
+    {
+        // The colour is constant, so nothing here depends on the mask beyond its
+        // coverage; the alpha is the darker of the draw's and the shadow's.
+        *outRgb = ctx->colour;
+        *outAlpha = (a < ctx->alpha) ? a : ctx->alpha;
+        return;
+    }
+
+    // mix(black, forceColour, col.a): straight multiplication, since mixing from
+    // black is a scale.
+    const int b = ((ctx->colour & 0x1F) * maskAlpha + 127) / 255;
+    const int g = (((ctx->colour >> 5) & 0x1F) * maskAlpha + 127) / 255;
+    const int r = (((ctx->colour >> 10) & 0x1F) * maskAlpha + 127) / 255;
+    *outRgb = (uint16_t) (b | (g << 5) | (r << 10));
+    *outAlpha = a;
+}
+
 // ===[ shd_ripple ]===
 //
 // Deltarune draws its water ripples as plain filled rectangles with this shader

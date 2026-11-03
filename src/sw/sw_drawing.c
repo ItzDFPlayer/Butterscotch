@@ -951,6 +951,53 @@ static void swrBlendSpriteCoverage(SWRenderer* swr, int dx, int dy, int dw, int 
     }
 }
 
+// Draws a silhouette surface through shd_shadowblend / shd_forcecolour: the
+// fragment takes its colour from the shader uniform and its coverage from the
+// mask, which is why this cannot share the normal sprite path - that one copies
+// the texel's own colour, and here the texel is only a white mask.
+static void swrBlendFlatShader(SWRenderer* swr, const SWRFlatShaderCtx* ctx,
+                               int dx, int dy, int dw, int dh,
+                               const SWTexture* texture, int sx, int sy,
+                               int32_t ixs2, int32_t oxs2, int32_t iys2, int32_t oys2,
+                               int fp_prec, int iys, int oys, int alpha)
+{
+    const int drawAlpha = alpha < 0 ? 0 : (alpha > 256 ? 256 : alpha);
+    const uint8_t* srcCoverage = texture->alphaPlane;
+
+    swr->pxWritten += (uint64_t) dw * (uint64_t) dh;
+    swr->pxScalarBlend += (uint64_t) dw * (uint64_t) dh;
+
+    (void) iys;
+    (void) oys;
+
+    int32_t ys2 = iys2;
+    for (int y = 0; y < dh; y++, ys2 += oys2)
+    {
+        const int srcRow = sy + (int) (ys2 >> fp_prec);
+        uintpixel_t* dstline = &swr->fb[(size_t) (dy + y) * swr->fbPitch + dx];
+        const uintpixel_t* srcline = &texture->buffer[(size_t) srcRow * texture->width + sx];
+        const uint8_t* srccoverageLine = (srcCoverage != nullptr)
+            ? &srcCoverage[(size_t) srcRow * texture->width + sx] : nullptr;
+
+        int32_t xs2 = ixs2;
+        for (int x = 0; x < dw; x++, xs2 += oxs2)
+        {
+            const int sxi = (int) (xs2 >> fp_prec);
+            const int maskAlpha = (srccoverageLine != nullptr)
+                ? (int) srccoverageLine[sxi] : (opaque(srcline[sxi]) ? 255 : 0);
+            if (maskAlpha == 0) continue;
+
+            uint16_t rgb;
+            int coverage;
+            swrShaderEmuFlatPixel(ctx, maskAlpha, drawAlpha, &rgb, &coverage);
+            if (coverage == 0) continue;
+
+            alphaBlend(&dstline[x], rgb, swrCalcSrcAlpha(swr, coverage),
+                       swrCalcDstAlpha(swr, coverage));
+        }
+    }
+}
+
 static void swrDrawSpriteInternal(
     Renderer* renderer, int dx, int dy, int dw, int dh,
     SWTexture* texture, int sx, int sy, int sw, int sh,
@@ -1055,6 +1102,19 @@ static void swrDrawSpriteInternal(
                                extAlpha, maskBits);
             }
         }
+        return;
+    }
+
+    // Chapter 4/5 sun shadows. The game draws object silhouettes into a surface and
+    // blits it with a shader that replaces the silhouette's colour with the shadow
+    // colour, keeping only its coverage. Drawing the surface as-is puts the raw
+    // white mask on screen - the solid band over the ground and the pale streaks
+    // across the characters in the cliff scenes.
+    SWRFlatShaderCtx flat;
+    if (UNLIKELY(swrShaderEmuFlatBegin(swr, &flat)) && swrTargetCoverage(swr) == nullptr)
+    {
+        swrBlendFlatShader(swr, &flat, dx, dy, dw, dh, texture, sx, sy,
+                           ixs2, oxs2, iys2, oys2, fp_prec, iys, oys, alpha);
         return;
     }
 

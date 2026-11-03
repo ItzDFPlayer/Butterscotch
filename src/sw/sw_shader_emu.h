@@ -85,4 +85,35 @@ bool swrShaderEmuBegin(SWRenderer* swr, SWRShaderContext* ctx);
 // fragment's rgb.
 void swrShaderEmuPixel(const SWRShaderContext* ctx, int x, int y, uint16_t* outRgb555);
 
+// ===[ shd_shadowblend and shd_forcecolour ]===
+//
+// Chapter 4 and 5 build the sun shadows by drawing object silhouettes into a
+// surface and then blitting that surface with a shader that throws the
+// silhouette's colour away entirely. shd_shadowblend paints every covered pixel
+// as shadowCol.rgb with alpha min(shadowCol.a, v_vColour.a * mask.a);
+// shd_forcecolour does the same for the highlight pass, ramping from black to
+// forceColour by the mask's alpha. Both keep the mask's coverage, so the effect
+// is a coloured overlay shaped like the silhouettes.
+//
+// Without them the mask is drawn in its own colours - white - and lands on the
+// screen as a solid white band over the ground and white streaks over the
+// characters, which is exactly how the chapter 5 cliff scene looked.
+typedef struct
+{
+    bool forceColour;   // false: shd_shadowblend, true: shd_forcecolour
+    uint16_t colour;    // RGB555 (alpha bit clear) of shadowCol/forceColour
+    int alpha;          // shadowCol.a as 0..256; unused by shd_forcecolour
+}
+SWRFlatShaderCtx;
+
+// Reads the uniforms for one flat-colour draw. False when the bound shader is
+// neither of the two, or the game has not set its colour uniform yet.
+bool swrShaderEmuFlatBegin(SWRenderer* swr, SWRFlatShaderCtx* ctx);
+
+// Fragment result for one texel: `maskAlpha` is the silhouette coverage (0..255)
+// and `drawAlpha` the draw call's alpha scaled to 0..256, which is the range this
+// renderer blends in. Writes RGB555 (alpha bit clear) and the final alpha.
+void swrShaderEmuFlatPixel(const SWRFlatShaderCtx* ctx, int maskAlpha, int drawAlpha,
+                           uint16_t* outRgb, int* outAlpha);
+
 #endif//_SW_SHADER_EMU_H
