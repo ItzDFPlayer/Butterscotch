@@ -1162,12 +1162,12 @@ static void SWRenderer_gpuSetBlendEnable(Renderer* renderer, bool enable)
     swrLogBlendState(swr, "set_blendenable");
 }
 
-// Every sprite and surface blit in this renderer samples the texture directly, so
-// interpolation is simply not something it can turn on: accept the call and keep the
-// nearest-pixel look, which is what GameMaker's default is anyway.
+// Nearest sampling is the default and stays the fast path; this only records the
+// request so the scaled blits can pick a bilinear fetch when the game asks for it.
 static void SWRenderer_gpuSetTexFilter(Renderer* renderer, bool enable)
 {
-    (void)renderer; (void)enable;
+    SWRenderer* swr = (SWRenderer*) renderer;
+    swr->texFilter = enable;
 }
 
 static void SWRenderer_gpuSetAlphaTestEnable(Renderer* renderer, bool enable)

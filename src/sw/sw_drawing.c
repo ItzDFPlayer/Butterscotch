@@ -874,20 +874,79 @@ static void swrBlendSpriteCoverage(SWRenderer* swr, int dx, int dy, int dw, int 
         const uint8_t* srccoverageLine = (srcCoverage != nullptr)
             ? &srcCoverage[(size_t) srcRow * texture->width + sx] : nullptr;
 
+        // Bilinear fetch for scaled draws when the game asked for it. Deltarune
+        // stretches a 10x10 dither tile across the whole screen for the sun shadows;
+        // with nearest sampling that tile becomes giant solid blocks, which is why
+        // the "shadow" came out as a white band, a checkerboard or nothing at all
+        // depending on where the camera was.
+        // Only inside a surface pass: the mask is built there, and keeping the scene
+        // draws unfiltered means turning texfilter on cannot blur the whole game.
+        const bool filtered = swr->texFilter && !unscaled && texture->alphaPlane == nullptr &&
+                              coveragePlane != nullptr;
+        const int32_t fracMask = (int32_t) ((1 << fp_prec) - 1);
+        const int srcRowNext = (srcRow + 1 < (int) texture->height) ? srcRow + 1 : srcRow;
+        const uintpixel_t* srclineNext = &texture->buffer[(size_t) srcRowNext * texture->width + sx];
+
         int32_t xs2 = ixs2;
         for (int x = 0; x < dw; x++, xs2 += oxs2)
         {
             const int sxi = (int) (xs2 >> fp_prec);
-            const uintpixel_t pixel = srcline[sxi];
-            const int texel = (srccoverageLine != nullptr)
-                ? (int) srccoverageLine[sxi] : (opaque(pixel) ? 255 : 0);
+            if (!filtered)
+            {
+                const uintpixel_t pixel = srcline[sxi];
+                const int texel = (srccoverageLine != nullptr)
+                    ? (int) srccoverageLine[sxi] : (opaque(pixel) ? 255 : 0);
+                if (texel == 0) continue;
+
+                const int coverage = (drawAlpha * texel + 127) / 255;
+                if (coverage == 0) continue;
+
+                swrBlendWithCoverage(&dstline[x], dstCoverageLine != nullptr ? &dstCoverageLine[x] : nullptr,
+                                     tint(tintColor, pixel), coverage, subtract);
+                continue;
+            }
+
+            // Bilinear tap: blend four texels, weighting coverage and colour alike so
+            // a half-covered dither averages to half coverage rather than snapping to
+            // the nearest opaque or transparent texel.
+            const int wx = (int) (((xs2 & fracMask) * 255) >> fp_prec);
+            const int wy = (int) (((ys2 & fracMask) * 255) >> fp_prec);
+            const int sxiNext = (sxi + 1 < (int) texture->width) ? sxi + 1 : sxi;
+
+            const uintpixel_t t00 = srcline[sxi], t10 = srcline[sxiNext];
+            const uintpixel_t t01 = srclineNext[sxi], t11 = srclineNext[sxiNext];
+            const int c00 = opaque(t00) ? 255 : 0, c10 = opaque(t10) ? 255 : 0;
+            const int c01 = opaque(t01) ? 255 : 0, c11 = opaque(t11) ? 255 : 0;
+
+            const int w00 = (255 - wx) * (255 - wy);
+            const int w10 = wx * (255 - wy);
+            const int w01 = (255 - wx) * wy;
+            const int w11 = wx * wy;
+            const int wsum = 255 * 255;
+
+            const int texel = (c00 * w00 + c10 * w10 + c01 * w01 + c11 * w11) / wsum;
             if (texel == 0) continue;
 
             const int coverage = (drawAlpha * texel + 127) / 255;
             if (coverage == 0) continue;
 
+            // Weighted colour, ignoring transparent texels so their (undefined) colour
+            // cannot bleed into the result.
+            const int csum = c00 * w00 + c10 * w10 + c01 * w01 + c11 * w11;
+            uintpixel_t mixed = 0;
+            if (csum > 0)
+            {
+                const int b = ((t00 & 0x1F) * c00 * w00 + (t10 & 0x1F) * c10 * w10 +
+                               (t01 & 0x1F) * c01 * w01 + (t11 & 0x1F) * c11 * w11) / csum;
+                const int g = (((t00 >> 5) & 0x1F) * c00 * w00 + ((t10 >> 5) & 0x1F) * c10 * w10 +
+                               ((t01 >> 5) & 0x1F) * c01 * w01 + ((t11 >> 5) & 0x1F) * c11 * w11) / csum;
+                const int r = (((t00 >> 10) & 0x1F) * c00 * w00 + ((t10 >> 10) & 0x1F) * c10 * w10 +
+                               ((t01 >> 10) & 0x1F) * c01 * w01 + ((t11 >> 10) & 0x1F) * c11 * w11) / csum;
+                mixed = (uintpixel_t) (b | (g << 5) | (r << 10));
+            }
+
             swrBlendWithCoverage(&dstline[x], dstCoverageLine != nullptr ? &dstCoverageLine[x] : nullptr,
-                                 tint(tintColor, pixel), coverage, subtract);
+                                 tint(tintColor, mixed), coverage, subtract);
         }
     }
 }

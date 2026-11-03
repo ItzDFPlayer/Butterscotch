@@ -93,6 +93,11 @@ typedef struct
     int lastGameW, lastGameH, lastMaxX, lastMaxY;
     float lastScaleX, lastScaleY;
     
+    // gpu_set_texfilter(). Only the scaled blits honour it, which is where it shows:
+    // Deltarune stretches small dither tiles across the screen for its sun shadows,
+    // and sampling those nearest turns a 50% dither into solid blocks.
+    bool texFilter;
+
     SWTexture** textures;
     SWSurface** surfaces;
     uint64_t textureUseClock;
