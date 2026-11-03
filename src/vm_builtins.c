@@ -11902,9 +11902,12 @@ static RValue builtin_draw_sprite_stretched(VMContext* ctx, RValue* args, MAYBE_
         subimg = (int32_t) ctx->currentCallFrame->self->imageIndex;
     }
 
-    // Same: the stretched variant is tinted by the current draw colour.
+    // draw_sprite_stretched() has no colour argument, and GameMaker draws it with the
+    // sprite's own colours: the tint here is white, and only draw_set_alpha applies.
+    // Feeding it the current draw colour made Deltarune's menu box lose its top edge,
+    // because the panel interior is filled with black just before that line is drawn.
     Renderer_drawSpriteStretched(runner->renderer, spriteIndex, subimg, x, y, w, h,
-                                 runner->renderer->drawColor, runner->renderer->drawAlpha);
+                                 0xFFFFFF, runner->renderer->drawAlpha);
     return RValue_makeUndefined();
 }
 
