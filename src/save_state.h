@@ -37,4 +37,11 @@ uint32_t SaveState_gameId(struct DataWin* dataWin);
 // "different game".
 void SaveState_describeIdentity(struct DataWin* dataWin, char* buf, size_t size);
 
+// Fills buf with the state file to use for the running game: a per-chapter name built
+// from the folder dataWinPath lives in, so chapters sharing one save folder each keep
+// their own snapshot. A shared "butterscotch-state.sav" from an older build is renamed
+// into place when its fingerprint matches this game.
+void SaveState_defaultPath(const char* saveDir, const char* dataWinPath, struct DataWin* dataWin,
+                           char* buf, size_t size);
+
 #endif//_BS_SAVE_STATE_H_

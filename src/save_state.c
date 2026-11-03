@@ -643,6 +643,101 @@ void SaveState_describeIdentity(DataWin* dataWin, char* buf, size_t size)
              (unsigned) dataWin->code.count);
 }
 
+// Turns the path of the running data.win into a short, filesystem-safe name for its
+// chapter: the folder the file lives in ("chapter2_windows"), which is what a player
+// recognises in a file listing. A bare "data.win" has no folder to borrow, so it gets
+// a fixed name instead.
+static void chapterLabel(const char* dataWinPath, char* buf, size_t size)
+{
+    if (buf == nullptr || size == 0) return;
+    buf[0] = '\0';
+
+    char dir[320];
+    snprintf(dir, sizeof(dir), "%s", dataWinPath != nullptr ? dataWinPath : "");
+
+    // Drop the file name, then any trailing separators, so "a/b/data.win" and
+    // "a/b/" both end up as "a/b".
+    size_t length = strlen(dir);
+    while (length > 0 && dir[length - 1] != '/' && dir[length - 1] != '\\') length--;
+    dir[length > 0 ? length - 1 : 0] = '\0';
+    length = strlen(dir);
+    while (length > 0 && (dir[length - 1] == '/' || dir[length - 1] == '\\')) dir[--length] = '\0';
+
+    // Last component of that directory.
+    const char* label = dir;
+    for (const char* p = dir; *p != '\0'; p++)
+    {
+        if (*p == '/' || *p == '\\') label = p + 1;
+    }
+    if (label[0] == '\0' || strcmp(label, ".") == 0 || strcmp(label, "..") == 0)
+    {
+        label = "game";
+    }
+
+    // SD cards are FAT32: keep it to characters every filesystem accepts.
+    size_t out = 0;
+    for (const char* p = label; *p != '\0' && out + 1 < size; p++)
+    {
+        const char c = *p;
+        const bool safe = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+                          || (c >= '0' && c <= '9') || c == '_' || c == '-';
+        buf[out++] = safe ? c : '_';
+    }
+    buf[out] = '\0';
+    if (out == 0) snprintf(buf, size, "%s", "game");
+}
+
+void SaveState_defaultPath(const char* saveDir, const char* dataWinPath, DataWin* dataWin,
+                           char* buf, size_t size)
+{
+    if (buf == nullptr || size == 0) return;
+    const char* dir = saveDir != nullptr ? saveDir : ".";
+
+    char label[64];
+    chapterLabel(dataWinPath, label, sizeof(label));
+    snprintf(buf, size, "%s/butterscotch-state-%s.sav", dir, label);
+
+    FILE* existing = fopen(buf, "rb");
+    if (existing != nullptr)
+    {
+        fclose(existing);
+        return;
+    }
+
+    // Older builds kept one shared file in the same folder, which is how a chapter
+    // ended up opening another chapter's snapshot and being told it belonged to a
+    // different game. Adopt it when it really is this game's state, so a snapshot
+    // taken before this change is not stranded.
+    char legacy[512];
+    snprintf(legacy, sizeof(legacy), "%s/butterscotch-state.sav", dir);
+    FILE* old = fopen(legacy, "rb");
+    if (old == nullptr) return;
+
+    uint8_t header[16];
+    const size_t got = fread(header, 1, sizeof(header), old);
+    fclose(old);
+    if (got != sizeof(header)) return;
+
+    Reader r = { .data = header, .size = sizeof(header), .position = 0, .ok = true };
+    char magic[8];
+    rdBytes(&r, magic, sizeof(magic));
+    rdU32(&r); // version: only the fingerprint below matters here
+    const uint32_t fingerprint = rdU32(&r);
+    if (!r.ok || memcmp(magic, SAVE_STATE_MAGIC, sizeof(magic)) != 0) return;
+    if (fingerprint != SaveState_gameId(dataWin)) return;
+
+    if (rename(legacy, buf) != 0)
+    {
+        // Read-only card or a cross-device save folder: keep using the shared file
+        // rather than losing the snapshot.
+        snprintf(buf, size, "%s", legacy);
+    }
+    else
+    {
+        logInfo("SaveState: moved '%s' to '%s'\n", legacy, buf);
+    }
+}
+
 static void wrGlobals(Writer* w, Graph* g, Instance* globalScope)
 {
     if (globalScope == nullptr)

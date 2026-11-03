@@ -1667,8 +1667,9 @@ int loop(CommandLineArgs args, const char *argv0) {
             if (env != nullptr && env[0] != '\0') loadStateFrame = (int32_t) strtol(env, nullptr, 10);
         }
         // Where the snapshot lives: an explicit path, otherwise next to the game's own
-        // saves, with the game's identity in the name so two chapters (or two games)
-        // sharing a save folder cannot overwrite each other's slot.
+        // saves, named after the folder this chapter's data.win lives in. Deltarune
+        // keeps every chapter inside the same save folder, so one shared file made a
+        // chapter open another chapter's snapshot.
         char statePath[512];
         {
             const char* env = getenv("BUTTERSCOTCH_STATE_PATH");
@@ -1676,20 +1677,7 @@ int loop(CommandLineArgs args, const char *argv0) {
                 snprintf(statePath, sizeof(statePath), "%s", env);
             } else {
                 const char* dir = sessionSaveDir != nullptr ? sessionSaveDir : ".";
-                snprintf(statePath, sizeof(statePath), "%s/butterscotch-state-%08x.sav",
-                         dir, SaveState_gameId(dataWin));
-
-                // Earlier builds kept a single shared file; keep using it when it is
-                // the only snapshot present, so an existing state is not stranded.
-                char legacyPath[512];
-                snprintf(legacyPath, sizeof(legacyPath), "%s/butterscotch-state.sav", dir);
-                FILE* probe = fopen(statePath, "rb");
-                if (probe != nullptr) {
-                    fclose(probe);
-                } else if ((probe = fopen(legacyPath, "rb")) != nullptr) {
-                    fclose(probe);
-                    snprintf(statePath, sizeof(statePath), "%s", legacyPath);
-                }
+                SaveState_defaultPath(dir, currentDataWinPath, dataWin, statePath, sizeof(statePath));
             }
             logInfo("Save states: %s\n", statePath);
         }
