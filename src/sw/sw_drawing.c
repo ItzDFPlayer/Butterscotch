@@ -990,11 +990,13 @@ static void swrDrawSpriteInternal(
             {
                 const uintpixel_t* srcline = &texture->buffer[(sy + y) * texture->width + sx];
 
+#if PIXEL_SIZE == 16
                 // A layer that reaches across the screen is mostly empty in the rows
                 // above and below what it actually covers. Scanning eight pixels at a
                 // time costs a fraction of the copy, and a row with no opaque pixel
                 // in it would otherwise be walked pixel by pixel for nothing.
                 if (!swrRowAnyOpaque(srcline, dw)) continue;
+#endif
 
                 uintpixel_t* dstline = &swr->fb[(dy + y) * swr->fbPitch + dx];
                 swrCopyRunOpaque(dstline, srcline, dw);
@@ -1035,7 +1037,11 @@ static void swrDrawSpriteInternal(
             // parts blown up by two, and stepping a fixed-point counter per output
             // pixel is most of what those rows cost. Writing each source pixel twice
             // walks the source once, in order, with no per-pixel index maths.
+#if PIXEL_SIZE == 16
             const bool doubleXStep = (oxs2 * 2 == (fixedp_t) (1 << fp_prec));
+#else
+            const bool doubleXStep = false;
+#endif
             fixedp_t ys2 = iys2;
             for (int y = 0, ys = iys; y < dh; y++, ys += oys, ys2 += oys2)
             {
@@ -1056,6 +1062,7 @@ static void swrDrawSpriteInternal(
                         continue;
                     }
                 }
+#if PIXEL_SIZE == 16
                 else if (doubleXStep)
                 {
                     const int xoff = (int) (ixs2 >> fp_prec);
@@ -1108,6 +1115,7 @@ static void swrDrawSpriteInternal(
                         continue;
                     }
                 }
+#endif
 
                 fixedp_t xs2 = ixs2;
                 for (int x = 0; x < dw; x++, xs2 += oxs2)
