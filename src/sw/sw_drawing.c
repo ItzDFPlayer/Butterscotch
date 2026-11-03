@@ -846,6 +846,42 @@ FORCE_INLINE void swrBlendWithCoverage(uintpixel_t* dst, uint8_t* dstCoverage,
     }
 }
 
+// Colour and coverage live in separate planes, so every path that writes colour into a
+// surface also has to build up the coverage plane. The ripple ring and the rectangle
+// fills write straight to the framebuffer, so without this a surface holding only those
+// reads back as empty and the composite drops it - which is what made the platformer
+// water ripples vanish completely.
+FORCE_INLINE void swrAccumulateCoverage(uint8_t* dstCoverage, int coverage)
+{
+    if (dstCoverage == nullptr || coverage <= 0) return;
+    if (coverage >= 256) { *dstCoverage = 255; return; }
+    const int out = (coverage * coverage) / 256 +
+                    ((int) *dstCoverage * (256 - coverage)) / 256;
+    *dstCoverage = (uint8_t) (out > 255 ? 255 : out);
+}
+
+// Same for a filled rectangle: the colour loop above only touched the colour plane.
+FORCE_INLINE void swrAccumulateCoverageRect(SWRenderer* swr, int x, int y, int w, int h, int coverage)
+{
+    uint8_t* coveragePlane = swrTargetCoverage(swr);
+    if (coveragePlane == nullptr || coverage <= 0) return;
+
+    int x0 = x < swr->portX ? swr->portX : x;
+    int x1 = x + w;
+    if (x1 > swr->maxX) x1 = swr->maxX;
+    int y0 = y < swr->portY ? swr->portY : y;
+    int y1 = y + h;
+    if (y1 > swr->maxY) y1 = swr->maxY;
+    if (x1 <= x0 || y1 <= y0) return;
+
+    for (int row = y0; row < y1; row++)
+    {
+        uint8_t* line = &coveragePlane[(size_t) row * swr->fbPitch];
+        for (int col = x0; col < x1; col++)
+            swrAccumulateCoverage(&line[col], coverage);
+    }
+}
+
 // Blends a sprite rectangle whose source or destination carries coverage. Used only
 // when a surface is on either side of the draw, so the ordinary sprites keep their
 // fast paths.
@@ -1877,6 +1913,13 @@ void swrFillRectangle(Renderer* renderer, float x1, float y1, float x2, float y2
         const int lastX = swr->maxX - 1;
         const int minX = x1i;
         const int maxRectX = x1i + xd;
+        uint8_t* coveragePlane = swrTargetCoverage(swr);
+        if (swrDiagLogEnabled())
+            logInfo("Ripple        centre=%.1f,%.1f radius=%.1f max=%.1f thickness=%.1f "
+                    "yratio=%.2f banding=%d fading=%d rect=%d,%d %dx%d surf=%d\n",
+                    ripple.centerX, ripple.centerY, ripple.radius, ripple.maxRadius,
+                    ripple.thickness, ripple.yRatio, ripple.banding, ripple.fading,
+                    x1i, y1i, xd, yd, swrIsOnSurface(swr) ? swr->currentSurfaceIndex : -1);
         for (int y = 0; y <= yd; y++) {
             const int dstY = y1i + y;
             if (dstY < swr->portY || dstY > swr->maxY - 1) continue;
@@ -1889,11 +1932,14 @@ void swrFillRectangle(Renderer* renderer, float x1, float y1, float x2, float y2
             if (outerX1 > lastX) outerX1 = lastX;
 
             uintpixel_t* row = &swr->fb[(size_t) dstY * swr->fbPitch];
+            uint8_t* coverageRow = (coveragePlane != nullptr)
+                ? &coveragePlane[(size_t) dstY * swr->fbPitch] : nullptr;
             for (int x = outerX0; x <= outerX1; x++) {
                 if (x >= holeX0 && x <= holeX1) { x = holeX1; continue; }
                 const int ringAlpha = swrShaderEmuRippleAlpha(&ripple, x, dstY);
                 if (ringAlpha <= 0) continue;
                 swrBlitPixelEx(swr, &row[x], srcPixel, ringAlpha, maskBits);
+                swrAccumulateCoverage(coverageRow != nullptr ? &coverageRow[x] : nullptr, ringAlpha);
             }
         }
         return;
@@ -1902,6 +1948,8 @@ void swrFillRectangle(Renderer* renderer, float x1, float y1, float x2, float y2
     for (int y = 0; y <= yd; y++) {
         swrDrawHLineInt(renderer, x1i, y1i + y, xd, pxcolor, pxcolor, alphaInt);
     }
+
+    swrAccumulateCoverageRect(swr, x1i, y1i, xd, yd, alphaInt);
 }
 
 void swrFillRectangleColor(Renderer* renderer, float x1, float y1, float x2, float y2, uintpixel_t pxcolor1, uintpixel_t pxcolor2, uintpixel_t pxcolor3, uintpixel_t pxcolor4, float alpha)
@@ -1925,6 +1973,8 @@ void swrFillRectangleColor(Renderer* renderer, float x1, float y1, float x2, flo
     for (int y = 0; y <= yd; y++) {
         swrDrawHLineInt(renderer, x1i, y1i + y, xd, pxcolor1, pxcolor2, alphaInt);
     }
+
+    swrAccumulateCoverageRect(swr, x1i, y1i, xd, yd, alphaInt);
 }
 
 // Diagnostic switch: with BUTTERSCOTCH_DIAG_NODRAW=1 every sprite blit returns
