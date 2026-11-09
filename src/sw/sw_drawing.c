@@ -634,6 +634,46 @@ FORCE_INLINE swrVec8 swrBlendVec(swrVec8 src, swrVec8 dst, swrVec8 tintR, swrVec
     return (blended & keepMask) | (dst & ~keepMask);
 }
 
+// Same maths as swrBlendVec(), but with a per-lane source weight (and a per-lane
+// keep mask) instead of one scalar alpha. The coverage composite needs this: every
+// pixel of a surface carries its own coverage byte, so the group has no single
+// alpha. Channels stay within 5 bits because each lane's weights still sum to 256.
+FORCE_INLINE swrVec8 swrBlendVecCoverage(swrVec8 src, swrVec8 dst, swrVec8 tintR, swrVec8 tintG,
+                                         swrVec8 tintB, bool applyTint, swrVec8 srcAlpha,
+                                         swrVec8 dstAlpha, swrVec8 plainMask, swrVec8 keepMask)
+{
+    const swrVec8 mask5 = swrSplat8(0x1F);
+    const swrVec8 opaqueBit = swrSplat8(0x8000);
+
+    swrVec8 sr = (src >> 10) & mask5;
+    swrVec8 sg = (src >> 5) & mask5;
+    swrVec8 sb = src & mask5;
+
+    if (applyTint)
+    {
+        sr = (sr * tintR) >> 5;
+        sg = (sg * tintG) >> 5;
+        sb = (sb * tintB) >> 5;
+    }
+
+    const swrVec8 dr = (dst >> 10) & mask5;
+    const swrVec8 dg = (dst >> 5) & mask5;
+    const swrVec8 db = dst & mask5;
+
+    const swrVec8 r = (dr * dstAlpha + sr * srcAlpha) >> 8;
+    const swrVec8 g = (dg * dstAlpha + sg * srcAlpha) >> 8;
+    const swrVec8 b = (db * dstAlpha + sb * srcAlpha) >> 8;
+
+    // alphaBlend() short-circuits a nearly opaque source over a nearly clear
+    // destination into a plain copy, so those lanes must copy the tinted source (with
+    // its own alpha bit) rather than run the weighted sum.
+    const swrVec8 tinted = (src & opaqueBit) | (sr << 10) | (sg << 5) | sb;
+    const swrVec8 weighted = opaqueBit | (r << 10) | (g << 5) | b;
+    const swrVec8 chosen = (weighted & ~plainMask) | (tinted & plainMask);
+
+    return (chosen & keepMask) | (dst & ~keepMask);
+}
+
 // True when the vector kernel handles this blend. bm_normal reproduces the scalar
 // output exactly; bm_add clamps instead of letting 5-bit channels overflow. That is
 // the only intentional difference in output, and it fixes a channel-bleed artefact
@@ -941,6 +981,18 @@ static void swrBlendSpriteCoverage(SWRenderer* swr, int dx, int dy, int dw, int 
 
     uint8_t* coveragePlane = swrTargetCoverage(swr);
 
+#if PIXEL_SIZE == 16 && defined(__GNUC__)
+    // A surface composite is the bulk of a layered room: the flowery hall draws
+    // sixty 240x720 surface quads, 11 MB of pixels per frame, all of them through
+    // this scalar loop. Where the coverage plane is fully set the coverage is just
+    // the draw alpha, which is exactly what the eight-lane kernel already computes,
+    // so those groups can go through swrBlendVec() instead.
+    const bool coverageVector = !subtract;
+    const swrVec8 covTintR = swrSplat8((uint16_t) ((tintColor >> 10) & 0x1F));
+    const swrVec8 covTintG = swrSplat8((uint16_t) ((tintColor >> 5) & 0x1F));
+    const swrVec8 covTintB = swrSplat8((uint16_t) (tintColor & 0x1F));
+#endif
+
     int32_t ys2 = iys2;
     for (int y = 0, ys = iys; y < dh; y++, ys += oys, ys2 += oys2)
     {
@@ -964,6 +1016,75 @@ static void swrBlendSpriteCoverage(SWRenderer* swr, int dx, int dy, int dw, int 
         const int32_t fracMask = (int32_t) ((1 << fp_prec) - 1);
         const int srcRowNext = (srcRow + 1 < (int) texture->height) ? srcRow + 1 : srcRow;
         const uintpixel_t* srclineNext = &texture->buffer[(size_t) srcRowNext * texture->width + sx];
+
+#if PIXEL_SIZE == 16 && defined(__GNUC__)
+        // Every pixel of a surface composite carries its own coverage byte, so a
+        // group has no single alpha: gather the eight texels with their coverage,
+        // blend with per-lane weights, and update the coverage plane alongside.
+        if (coverageVector && srccoverageLine != nullptr && !filtered)
+        {
+            int x = 0;
+            int32_t xs = ixs2;
+            for (; x + 8 <= dw; x += 8, xs += oxs2 * 8)
+            {
+                uint16_t gathered[8];
+                uint16_t srcAlphaBytes[8];
+                uint16_t dstAlphaBytes[8];
+                uint16_t plainBytes[8];
+                int32_t texelX = xs;
+
+                for (int k = 0; k < 8; k++, texelX += oxs2)
+                {
+                    const int sxi = (int) (texelX >> fp_prec);
+                    gathered[k] = srcline[sxi];
+                    const int coverage = coverageLut[srccoverageLine[sxi]];
+                    srcAlphaBytes[k] = (uint16_t) coverage;
+                    dstAlphaBytes[k] = (uint16_t) (256 - coverage);
+                    plainBytes[k] = (uint16_t) (coverage > 253 ? 0xFFFF : 0);
+                }
+
+                swrVec8 src, dst, srcAlpha, dstAlpha, plainMask, keep;
+                memcpy(&src, gathered, sizeof(src));
+                memcpy(&srcAlpha, srcAlphaBytes, sizeof(srcAlpha));
+                memcpy(&dstAlpha, dstAlphaBytes, sizeof(dstAlpha));
+                memcpy(&plainMask, plainBytes, sizeof(plainMask));
+                memcpy(&dst, dstline + x, sizeof(dst));
+
+                // A lane with no coverage writes nothing, exactly like the scalar
+                // loop's "continue".
+                keep = (swrVec8) (srcAlpha != swrSplat8(0));
+
+                const swrVec8 out = swrBlendVecCoverage(src, dst, covTintR, covTintG, covTintB,
+                                                        !whiteTint, srcAlpha, dstAlpha,
+                                                        plainMask, keep);
+                memcpy(dstline + x, &out, sizeof(out));
+
+                if (dstCoverageLine != nullptr)
+                {
+                    for (int k = 0; k < 8; k++)
+                    {
+                        const int coverage = srcAlphaBytes[k];
+                        if (coverage == 0) continue;
+                        const int blendedCoverage = (coverage * coverage) / 256 +
+                                                    ((int) dstCoverageLine[x + k] * (256 - coverage)) / 256;
+                        dstCoverageLine[x + k] = (uint8_t) (blendedCoverage > 255 ? 255 : blendedCoverage);
+                    }
+                }
+            }
+            for (; x < dw; x++, xs += oxs2)
+            {
+                const int sxi = (int) (xs >> fp_prec);
+                const int coverage = coverageLut[srccoverageLine[sxi]];
+                if (coverage == 0) continue;
+                const uintpixel_t pixel = srcline[sxi];
+                swrBlendWithCoverage(&dstline[x],
+                                     dstCoverageLine != nullptr ? &dstCoverageLine[x] : nullptr,
+                                     whiteTint ? pixel : tint(tintColor, pixel),
+                                     coverage, false);
+            }
+            continue;
+        }
+#endif
 
         int32_t xs2 = ixs2;
         for (int x = 0; x < dw; x++, xs2 += oxs2)
@@ -1027,6 +1148,7 @@ static void swrBlendSpriteCoverage(SWRenderer* swr, int dx, int dy, int dw, int 
                                  (whiteTint ? mixed : tint(tintColor, mixed)), coverage, subtract);
         }
     }
+
 }
 
 // Draws a silhouette surface through shd_shadowblend / shd_forcecolour: the
